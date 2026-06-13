@@ -316,7 +316,18 @@ function publicProxy(proxy: AccountProxy) {
 }
 
 function parseOAuthCallbackParams(callbackUrl: string): { code?: string; state?: string; error?: string } {
-    const parsed = new URL(callbackUrl);
+    if (!/^https?:\/\//i.test(callbackUrl)) {
+        throw new Error('Paste the full callback URL from the browser address bar, starting with http://127.0.0.1:3050/api/auth/callback?code=...');
+    }
+    let parsed: URL;
+    try {
+        parsed = new URL(callbackUrl);
+    } catch {
+        throw new Error('Callback URL is invalid. Paste the full URL from the browser address bar.');
+    }
+    if (!['127.0.0.1', 'localhost'].includes(parsed.hostname) || parsed.pathname !== '/api/auth/callback') {
+        throw new Error('Callback URL must be the localhost Google redirect URL from this OAuth flow.');
+    }
     return {
         code: parsed.searchParams.get('code') || undefined,
         state: parsed.searchParams.get('state') || undefined,
@@ -497,8 +508,7 @@ app.get('/api/auth/callback', async (req, res) => {
     } catch (err: any) {
         const safeError = sanitizeProxyError(err);
         console.error('Callback error:', safeError);
-        const errMsg = process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : `Authentication failed: ${safeError}`;
-        res.status(500).send(errMsg);
+        res.status(500).send(`Authentication failed: ${safeError}`);
     }
 });
 
@@ -517,7 +527,8 @@ app.post('/api/auth/manual-callback', requireAdmin, async (req, res) => {
     } catch (err: any) {
         const safeError = sanitizeProxyError(err);
         console.error('Manual callback error:', safeError);
-        res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : safeError });
+        const isInputError = safeError.includes('Callback URL') || safeError.includes('Paste the full callback URL');
+        res.status(isInputError ? 400 : 500).json({ error: safeError });
     }
 });
 
