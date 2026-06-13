@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+config.json
+data
+node_modules
+.next
+dist
+out
+.cache
+.npm-cache
+coverage
+npm-debug.log*
+Dockerfile
+deploy

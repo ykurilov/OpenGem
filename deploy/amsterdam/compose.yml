@@ -1,0 +1,49 @@
+name: opengem
+
+services:
+  opengem:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: opengem:latest
+    container_name: opengem
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      NODE_ENV: production
+      PORT: "3050"
+      HOST: "0.0.0.0"
+      CORS_ORIGIN: "https://opengem.yeycourses.com"
+      OAUTH_REDIRECT_URI: "https://opengem.yeycourses.com/api/auth/callback"
+    volumes:
+      - ../../data:/app/data
+      - ../../config.json:/app/config.json
+      - ../../.env:/app/.env:ro
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "n8n_default"
+      traefik.http.routers.opengem.rule: "Host(`opengem.yeycourses.com`)"
+      traefik.http.routers.opengem.entrypoints: "web,websecure"
+      traefik.http.routers.opengem.tls: "true"
+      traefik.http.routers.opengem.tls.certresolver: "mytlschallenge"
+      traefik.http.services.opengem.loadbalancer.server.port: "3050"
+      traefik.http.middlewares.opengem-headers.headers.STSSeconds: "31536000"
+      traefik.http.middlewares.opengem-headers.headers.STSIncludeSubdomains: "true"
+      traefik.http.middlewares.opengem-headers.headers.contentTypeNosniff: "true"
+      traefik.http.middlewares.opengem-headers.headers.browserXSSFilter: "true"
+      traefik.http.routers.opengem.middlewares: "opengem-headers@docker"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:3050/api/setup/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - n8n_default
+
+networks:
+  n8n_default:
+    external: true
