@@ -63,6 +63,15 @@ export async function startAuthBrowserSession(input: {
     const proxyUrl = new URL(parsedProxy.normalizedUrl);
     const userDataDir = path.join(TEMP_ROOT, input.id);
     fs.mkdirSync(userDataDir, { recursive: true });
+    const browserEnv = {
+        ...process.env,
+        XDG_CONFIG_HOME: path.join(userDataDir, 'xdg-config'),
+        XDG_CACHE_HOME: path.join(userDataDir, 'xdg-cache'),
+        XDG_DATA_HOME: path.join(userDataDir, 'xdg-data'),
+    };
+    fs.mkdirSync(browserEnv.XDG_CONFIG_HOME, { recursive: true });
+    fs.mkdirSync(browserEnv.XDG_CACHE_HOME, { recursive: true });
+    fs.mkdirSync(browserEnv.XDG_DATA_HOME, { recursive: true });
     const display = `:${90 + sessions.size}`;
     const xvfb = USE_HEADLESS_BROWSER ? undefined : startXvfb(display);
     if (xvfb) {
@@ -75,7 +84,7 @@ export async function startAuthBrowserSession(input: {
             executablePath: CHROMIUM_PATH,
             headless: USE_HEADLESS_BROWSER,
             viewport: VIEWPORT,
-            env: USE_HEADLESS_BROWSER ? process.env : { ...process.env, DISPLAY: display },
+            env: USE_HEADLESS_BROWSER ? browserEnv : { ...browserEnv, DISPLAY: display },
             proxy: {
                 server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
                 username: decodeURIComponent(proxyUrl.username),
