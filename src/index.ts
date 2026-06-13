@@ -315,6 +315,49 @@ function publicProxy(proxy: AccountProxy) {
     };
 }
 
+function parseOAuthCallbackParams(callbackUrl: string): { code?: string; state?: string; error?: string } {
+    const parsed = new URL(callbackUrl);
+    return {
+        code: parsed.searchParams.get('code') || undefined,
+        state: parsed.searchParams.get('state') || undefined,
+        error: parsed.searchParams.get('error') || undefined,
+    };
+}
+
+async function completeOAuthAccountConnection(code: string, state: string): Promise<void> {
+    const authState = authStates.get(state);
+    if (!authState) {
+        throw new Error('Invalid or expired authentication state.');
+    }
+    authStates.delete(state);
+
+    const proxy = await getDatabase().getProxy(authState.proxyId);
+    if (!proxy) {
+        throw new Error('Selected account proxy is no longer available.');
+    }
+    const proxyUrl = proxy.url;
+
+    const tokens = await exchangeCodeForTokens(code, authState.verifier, proxyUrl);
+    const email = await getUserEmail(tokens.accessToken, proxyUrl);
+    const projectId = await discoverProjectId(tokens.accessToken, proxyUrl);
+    const { isPro, tierName } = await checkAccountTier(tokens.accessToken, proxyUrl);
+
+    await getDatabase().upsertAccount({
+        id: email,
+        email,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        projectId,
+        expiresAt: tokens.expiresAt,
+        isActive: true,
+        isPro,
+        tierName,
+        lastUsedAt: new Date(),
+        proxyId: proxy.id,
+    });
+    invalidateAccountCache();
+}
+
 async function buildProxyFromInput(value: string, name?: string, id?: string): Promise<AccountProxy> {
     const parsed = parseProxyInput(value);
     return {
@@ -448,51 +491,33 @@ app.get('/api/auth/callback', async (req, res) => {
         return res.status(400).send(`OAuth Error: ${error || 'Missing parameters'}`);
     }
 
-    const authState = authStates.get(state as string);
-    if (!authState) {
-        return res.status(400).send('Invalid or expired authentication state.');
-    }
-    authStates.delete(state as string);
-
     try {
-        const proxy = await getDatabase().getProxy(authState.proxyId);
-        if (!proxy) {
-            throw new Error('Selected account proxy is no longer available.');
-        }
-        const proxyUrl = proxy.url;
-
-        // Exchange code
-        const tokens = await exchangeCodeForTokens(code as string, authState.verifier, proxyUrl);
-
-        // Discover project ID and Email
-        const email = await getUserEmail(tokens.accessToken, proxyUrl);
-        const projectId = await discoverProjectId(tokens.accessToken, proxyUrl);
-
-        // Check account tier
-        const { isPro, tierName } = await checkAccountTier(tokens.accessToken, proxyUrl);
-
-        // Upsert into database
-        await getDatabase().upsertAccount({
-            id: email, // use email as ID
-            email,
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-            projectId,
-            expiresAt: tokens.expiresAt,
-            isActive: true,
-            isPro,
-            tierName,
-            lastUsedAt: new Date(),
-            proxyId: proxy.id,
-        });
-        invalidateAccountCache(); // Newly added account should be available immediately
-
+        await completeOAuthAccountConnection(code as string, state as string);
         res.redirect('/');
     } catch (err: any) {
         const safeError = sanitizeProxyError(err);
         console.error('Callback error:', safeError);
         const errMsg = process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : `Authentication failed: ${safeError}`;
         res.status(500).send(errMsg);
+    }
+});
+
+app.post('/api/auth/manual-callback', requireAdmin, async (req, res) => {
+    try {
+        const callbackUrl = String(req.body?.callbackUrl || '').trim();
+        if (!callbackUrl) {
+            return res.status(400).json({ error: 'Callback URL is required.' });
+        }
+        const { code, state, error } = parseOAuthCallbackParams(callbackUrl);
+        if (error || !code || !state) {
+            return res.status(400).json({ error: `OAuth callback is missing code or state${error ? `: ${error}` : ''}.` });
+        }
+        await completeOAuthAccountConnection(code, state);
+        res.json({ success: true });
+    } catch (err: any) {
+        const safeError = sanitizeProxyError(err);
+        console.error('Manual callback error:', safeError);
+        res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : safeError });
     }
 });
 

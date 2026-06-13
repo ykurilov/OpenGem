@@ -15,7 +15,7 @@ services:
       PORT: "3050"
       HOST: "0.0.0.0"
       CORS_ORIGIN: "https://opengem.yeycourses.com"
-      OAUTH_REDIRECT_URI: "https://opengem.yeycourses.com/api/auth/callback"
+      OAUTH_REDIRECT_URI: "http://127.0.0.1:3050/api/auth/callback"
     volumes:
       - ../../data:/app/data
       - ../../config.json:/app/config.json

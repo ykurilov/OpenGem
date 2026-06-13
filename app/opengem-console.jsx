@@ -445,6 +445,8 @@ export function OpenGemConsole() {
   const [proxyImportText, setProxyImportText] = useState("");
   const [proxyActionStatus, setProxyActionStatus] = useState("");
   const [proxyTestingId, setProxyTestingId] = useState("");
+  const [oauthCallbackUrl, setOauthCallbackUrl] = useState("");
+  const [oauthCallbackStatus, setOauthCallbackStatus] = useState("");
   const [keys, setKeys] = useState([]);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState({});
@@ -715,6 +717,28 @@ export function OpenGemConsole() {
       body: JSON.stringify({ proxyId }),
     });
     await loadAccounts();
+  }
+
+  async function submitManualOAuthCallback(event) {
+    event.preventDefault();
+    const callbackUrl = oauthCallbackUrl.trim();
+    if (!callbackUrl) return;
+    setOauthCallbackStatus("");
+    setLoadingKey("oauthCallback", true);
+    try {
+      await requestJson("/api/auth/manual-callback", {
+        method: "POST",
+        body: JSON.stringify({ callbackUrl }),
+      });
+      setOauthCallbackUrl("");
+      setOauthCallbackStatus("Account connected.");
+      await loadAccounts();
+      await loadStats();
+    } catch (err) {
+      setOauthCallbackStatus(err.message);
+    } finally {
+      setLoadingKey("oauthCallback", false);
+    }
   }
 
   async function createKey(event) {
@@ -1037,11 +1061,16 @@ export function OpenGemConsole() {
                   proxyLoading={loading.proxies}
                   proxyImporting={loading.proxyImport}
                   proxyTestingId={proxyTestingId}
+                  oauthCallbackUrl={oauthCallbackUrl}
+                  setOauthCallbackUrl={setOauthCallbackUrl}
+                  oauthCallbackStatus={oauthCallbackStatus}
+                  oauthCallbackLoading={loading.oauthCallback}
                   onRefresh={refreshAccountsPage}
                   onImportProxies={importProxies}
                   onDeleteProxy={deleteProxy}
                   onTestProxy={testProxy}
                   onAssignProxy={assignAccountProxy}
+                  onSubmitOAuthCallback={submitManualOAuthCallback}
                   onDelete={deleteAccount}
                   onReactivate={reactivateAccount}
                 />
@@ -1242,11 +1271,16 @@ function AccountsPage({
   proxyLoading,
   proxyImporting,
   proxyTestingId,
+  oauthCallbackUrl,
+  setOauthCallbackUrl,
+  oauthCallbackStatus,
+  oauthCallbackLoading,
   onRefresh,
   onImportProxies,
   onDeleteProxy,
   onTestProxy,
   onAssignProxy,
+  onSubmitOAuthCallback,
   onDelete,
   onReactivate,
 }) {
@@ -1348,6 +1382,22 @@ function AccountsPage({
               <div className="mt-3 text-xs text-muted-foreground">
                 {selectedProxy ? selectedProxy.maskedUrl : "Connect is locked until a proxy is selected."}
               </div>
+              <form className="mt-4 grid gap-2" onSubmit={onSubmitOAuthCallback}>
+                <label className="grid gap-2 text-sm">
+                  <span className="font-medium">Google callback URL</span>
+                  <Textarea
+                    value={oauthCallbackUrl}
+                    onChange={(event) => setOauthCallbackUrl(event.target.value)}
+                    placeholder="http://127.0.0.1:3050/api/auth/callback?code=..."
+                    className="min-h-20 font-mono text-xs"
+                  />
+                </label>
+                <Button type="submit" variant="outline" disabled={oauthCallbackLoading || !oauthCallbackUrl.trim()}>
+                  {oauthCallbackLoading ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <CheckCircle2 data-icon="inline-start" />}
+                  Complete OAuth
+                </Button>
+                {oauthCallbackStatus ? <p className="text-xs text-muted-foreground">{oauthCallbackStatus}</p> : null}
+              </form>
             </div>
           </div>
         </CardContent>
