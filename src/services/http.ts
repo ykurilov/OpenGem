@@ -2,10 +2,13 @@ import https from 'https';
 import http from 'http';
 import { URL } from 'url';
 
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
 interface RequestOptions {
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    proxyUrl?: string;
     /**
      * Socket inactivity timeout in milliseconds. Defaults to 30_000 for
      * `nativeFetch` and 120_000 for `nativeFetchStream`. Long Gemini
@@ -47,6 +50,9 @@ export function nativeFetchStream(url: string, options: RequestOptions = {}): Pr
             method: options.method || 'GET',
             headers,
         };
+        if (options.proxyUrl) {
+            reqOptions.agent = new HttpsProxyAgent(options.proxyUrl) as any;
+        }
 
         const req = lib.request(reqOptions, (res) => {
             resolve({ status: res.statusCode || 0, stream: res });
@@ -87,6 +93,9 @@ export function nativeFetch(url: string, options: RequestOptions = {}): Promise<
             method: options.method || 'GET',
             headers,
         };
+        if (options.proxyUrl) {
+            reqOptions.agent = new HttpsProxyAgent(options.proxyUrl) as any;
+        }
 
         const req = lib.request(reqOptions, (res) => {
             const chunks: Buffer[] = [];

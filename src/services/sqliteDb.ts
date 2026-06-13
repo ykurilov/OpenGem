@@ -16,7 +16,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { encrypt, decrypt } from './config';
-import type { IDatabase, Account, ApiKey, RequestLog, DbStats } from './database';
+import type { IDatabase, Account, AccountProxy, ApiKey, RequestLog, DbStats } from './database';
 import { mergeEffectiveTokenStats } from './token-stats';
 
 const DATA_DIR = path.join(__dirname, '../../data');
@@ -57,12 +57,24 @@ function getDb(): DatabaseSync {
             isPro             INTEGER,
             tierName          TEXT,
             exhaustedAt       TEXT,
+            proxyId           TEXT,
             createdAt         TEXT,
             updatedAt         TEXT,
             totalRequests     INTEGER NOT NULL DEFAULT 0,
             successfulRequests INTEGER NOT NULL DEFAULT 0,
             failedRequests    INTEGER NOT NULL DEFAULT 0,
             totalTokensUsed   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS account_proxies (
+            id        TEXT PRIMARY KEY,
+            name      TEXT NOT NULL,
+            url       TEXT NOT NULL,
+            host      TEXT NOT NULL,
+            port      INTEGER NOT NULL,
+            username  TEXT NOT NULL,
+            session   TEXT,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS api_keys (
@@ -98,6 +110,7 @@ function getDb(): DatabaseSync {
         CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
     `);
     ensureRequestLogAffinityColumns(db);
+    ensureAccountProxyColumns(db);
     _db = db;
 
     // One-shot migration from legacy JSON, if present.
@@ -245,6 +258,17 @@ function ensureRequestLogAffinityColumns(db: DatabaseSync): void {
     addColumn('effectiveTokensUsed', 'INTEGER');
 }
 
+function ensureAccountProxyColumns(db: DatabaseSync): void {
+    const columns = new Set(
+        (db.prepare('PRAGMA table_info(accounts)').all() as any[])
+            .map(row => String(row.name)),
+    );
+    if (!columns.has('proxyId')) {
+        db.exec('ALTER TABLE accounts ADD COLUMN proxyId TEXT');
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_proxy_id ON accounts(proxyId)');
+}
+
 // --- Helpers --------------------------------------------------------------
 
 function hashApiKey(key: string): string {
@@ -283,7 +307,32 @@ function rowToAccount(r: any): Account {
         successfulRequests: r.successfulRequests ?? 0,
         failedRequests: r.failedRequests ?? 0,
         totalTokensUsed: r.totalTokensUsed ?? 0,
+        proxyId: r.proxyId ?? undefined,
+        proxyUrl: r.proxyUrl ? decrypt(r.proxyUrl) : undefined,
     };
+}
+
+function rowToProxy(r: any): AccountProxy {
+    return {
+        id: r.id,
+        name: r.name,
+        url: decrypt(r.url),
+        host: r.host,
+        port: Number(r.port),
+        username: r.username,
+        session: r.session ?? undefined,
+        createdAt: r.createdAt ? new Date(r.createdAt) : undefined,
+        updatedAt: r.updatedAt ? new Date(r.updatedAt) : undefined,
+    };
+}
+
+function accountSelectSql(where: string): string {
+    return `
+        SELECT accounts.*, account_proxies.url AS proxyUrl
+        FROM accounts
+        LEFT JOIN account_proxies ON account_proxies.id = accounts.proxyId
+        ${where}
+    `;
 }
 
 // --- Implementation ------------------------------------------------------
@@ -294,14 +343,14 @@ export const sqliteDb: IDatabase = {
 
     async getActiveAccounts(): Promise<Account[]> {
         const rows = getDb().prepare(
-            'SELECT * FROM accounts WHERE isActive = 1 ORDER BY lastUsedAt ASC'
+            accountSelectSql('WHERE accounts.isActive = 1 ORDER BY accounts.lastUsedAt ASC')
         ).all();
         return rows.map(rowToAccount);
     },
 
     async getAllAccounts(): Promise<Account[]> {
         const rows = getDb().prepare(
-            'SELECT * FROM accounts ORDER BY lastUsedAt ASC'
+            accountSelectSql('ORDER BY accounts.lastUsedAt ASC')
         ).all();
         return rows.map(rowToAccount);
     },
@@ -315,9 +364,9 @@ export const sqliteDb: IDatabase = {
         db.prepare(`
             INSERT INTO accounts (
                 email, id, accessToken, refreshToken, projectId, expiresAt, isActive,
-                lastUsedAt, isPro, tierName, exhaustedAt, createdAt, updatedAt,
+                lastUsedAt, isPro, tierName, exhaustedAt, proxyId, createdAt, updatedAt,
                 totalRequests, successfulRequests, failedRequests, totalTokensUsed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(email) DO UPDATE SET
                 id = excluded.id,
                 accessToken = excluded.accessToken,
@@ -329,6 +378,7 @@ export const sqliteDb: IDatabase = {
                 isPro = excluded.isPro,
                 tierName = excluded.tierName,
                 exhaustedAt = excluded.exhaustedAt,
+                proxyId = excluded.proxyId,
                 updatedAt = excluded.updatedAt
         `).run(
             account.email,
@@ -342,6 +392,7 @@ export const sqliteDb: IDatabase = {
             account.isPro === undefined ? null : (account.isPro ? 1 : 0),
             account.tierName ?? null,
             toIsoOrNull(account.exhaustedAt),
+            account.proxyId ?? null,
             createdAt,
             now,
             account.totalRequests ?? 0,
@@ -370,6 +421,7 @@ export const sqliteDb: IDatabase = {
         if (data.isPro !== undefined) set('isPro', data.isPro ? 1 : 0);
         if (data.tierName !== undefined) set('tierName', data.tierName);
         if (data.exhaustedAt !== undefined) set('exhaustedAt', toIsoOrNull(data.exhaustedAt));
+        if (data.proxyId !== undefined) set('proxyId', data.proxyId || null);
 
         set('updatedAt', new Date().toISOString());
 
@@ -427,6 +479,65 @@ export const sqliteDb: IDatabase = {
 
     async deleteAccount(idOrEmail: string): Promise<void> {
         getDb().prepare('DELETE FROM accounts WHERE email = ? OR id = ?').run(idOrEmail, idOrEmail);
+    },
+
+    // --- Account proxies ---
+
+    async getAllProxies(): Promise<AccountProxy[]> {
+        const rows = getDb().prepare(
+            'SELECT * FROM account_proxies ORDER BY createdAt DESC'
+        ).all() as any[];
+        return rows.map(rowToProxy);
+    },
+
+    async getProxy(id: string): Promise<AccountProxy | null> {
+        const row = getDb().prepare(
+            'SELECT * FROM account_proxies WHERE id = ?'
+        ).get(id) as any;
+        return row ? rowToProxy(row) : null;
+    },
+
+    async upsertProxy(proxy: AccountProxy): Promise<AccountProxy> {
+        const db = getDb();
+        const now = new Date().toISOString();
+        const id = proxy.id || generateId();
+        const existing = db.prepare('SELECT createdAt FROM account_proxies WHERE id = ?').get(id) as any;
+        const createdAt = existing?.createdAt || now;
+
+        db.prepare(`
+            INSERT INTO account_proxies (
+                id, name, url, host, port, username, session, createdAt, updatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                url = excluded.url,
+                host = excluded.host,
+                port = excluded.port,
+                username = excluded.username,
+                session = excluded.session,
+                updatedAt = excluded.updatedAt
+        `).run(
+            id,
+            proxy.name,
+            encrypt(proxy.url),
+            proxy.host,
+            proxy.port,
+            proxy.username,
+            proxy.session ?? null,
+            createdAt,
+            now,
+        );
+
+        return {
+            ...proxy,
+            id,
+            createdAt: new Date(createdAt),
+            updatedAt: new Date(now),
+        };
+    },
+
+    async deleteProxy(id: string): Promise<void> {
+        getDb().prepare('DELETE FROM account_proxies WHERE id = ?').run(id);
     },
 
     // --- API keys ---

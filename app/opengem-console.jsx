@@ -440,6 +440,11 @@ export function OpenGemConsole() {
   const [privacyMode, setPrivacyMode] = useState(false);
   const [stats, setStats] = useState(null);
   const [accounts, setAccounts] = useState([]);
+  const [proxies, setProxies] = useState([]);
+  const [selectedProxyId, setSelectedProxyId] = useState("");
+  const [proxyImportText, setProxyImportText] = useState("");
+  const [proxyActionStatus, setProxyActionStatus] = useState("");
+  const [proxyTestingId, setProxyTestingId] = useState("");
   const [keys, setKeys] = useState([]);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState({});
@@ -553,6 +558,24 @@ export function OpenGemConsole() {
     }
   }, [requestJson, setErrorKey, setLoadingKey]);
 
+  const loadProxies = useCallback(async () => {
+    setLoadingKey("proxies", true);
+    setErrorKey("proxies", "");
+    try {
+      const data = await requestJson("/api/proxies");
+      setProxies(data);
+      setSelectedProxyId((current) => data.some((proxy) => proxy.id === current) ? current : data[0]?.id || "");
+    } catch (err) {
+      if (err.message !== "Unauthorized") setErrorKey("proxies", err.message);
+    } finally {
+      setLoadingKey("proxies", false);
+    }
+  }, [requestJson, setErrorKey, setLoadingKey]);
+
+  const refreshAccountsPage = useCallback(async () => {
+    await Promise.all([loadAccounts(), loadProxies()]);
+  }, [loadAccounts, loadProxies]);
+
   const loadKeys = useCallback(async () => {
     setLoadingKey("keys", true);
     setErrorKey("keys", "");
@@ -592,11 +615,11 @@ export function OpenGemConsole() {
   useEffect(() => {
     if (view !== "dashboard") return;
     if (currentPage === "overview") loadStats();
-    if (currentPage === "accounts") loadAccounts();
+    if (currentPage === "accounts") refreshAccountsPage();
     if (currentPage === "keys") loadKeys();
     if (currentPage === "logs") loadLogs();
     if (currentPage === "settings") loadDbStatus();
-  }, [currentPage, loadAccounts, loadDbStatus, loadKeys, loadLogs, loadStats, view]);
+  }, [currentPage, loadDbStatus, loadKeys, loadLogs, loadStats, refreshAccountsPage, view]);
 
   function navigate(pageId) {
     setCurrentPage(pageId);
@@ -635,6 +658,63 @@ export function OpenGemConsole() {
         await loadStats();
       },
     });
+  }
+
+  async function importProxies(event) {
+    event.preventDefault();
+    const text = proxyImportText.trim();
+    if (!text) return;
+    setProxyActionStatus("");
+    setLoadingKey("proxyImport", true);
+    try {
+      const data = await requestJson("/api/proxies/bulk", {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+      setProxyImportText("");
+      setProxyActionStatus(`Imported ${data.proxies?.length || 0} proxy records${data.errors?.length ? `, ${data.errors.length} skipped` : ""}.`);
+      await loadProxies();
+    } catch (err) {
+      setProxyActionStatus(err.message);
+    } finally {
+      setLoadingKey("proxyImport", false);
+    }
+  }
+
+  function deleteProxy(id, name) {
+    setConfirmActionError("");
+    setConfirmAction({
+      title: "Delete Proxy",
+      description: `Delete proxy "${name}"? Assigned proxies must be replaced before deletion.`,
+      confirmLabel: "Delete Proxy",
+      destructive: true,
+      onConfirm: async () => {
+        await requestJson(`/api/proxies/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await loadProxies();
+      },
+    });
+  }
+
+  async function testProxy(id) {
+    setProxyActionStatus("");
+    setProxyTestingId(id);
+    try {
+      const data = await requestJson(`/api/proxies/${encodeURIComponent(id)}/test`, { method: "POST" });
+      setProxyActionStatus(data.ip ? `Proxy test OK. Exit IP: ${data.ip}` : "Proxy test OK.");
+    } catch (err) {
+      setProxyActionStatus(err.message);
+    } finally {
+      setProxyTestingId("");
+    }
+  }
+
+  async function assignAccountProxy(accountId, proxyId) {
+    if (!proxyId) return;
+    await requestJson(`/api/accounts/${encodeURIComponent(accountId)}/proxy`, {
+      method: "PUT",
+      body: JSON.stringify({ proxyId }),
+    });
+    await loadAccounts();
   }
 
   async function createKey(event) {
@@ -948,7 +1028,20 @@ export function OpenGemConsole() {
                   loading={loading.accounts}
                   error={errors.accounts}
                   privacyMode={privacyMode}
-                  onRefresh={loadAccounts}
+                  proxies={proxies}
+                  selectedProxyId={selectedProxyId}
+                  setSelectedProxyId={setSelectedProxyId}
+                  proxyImportText={proxyImportText}
+                  setProxyImportText={setProxyImportText}
+                  proxyStatus={proxyActionStatus}
+                  proxyLoading={loading.proxies}
+                  proxyImporting={loading.proxyImport}
+                  proxyTestingId={proxyTestingId}
+                  onRefresh={refreshAccountsPage}
+                  onImportProxies={importProxies}
+                  onDeleteProxy={deleteProxy}
+                  onTestProxy={testProxy}
+                  onAssignProxy={assignAccountProxy}
                   onDelete={deleteAccount}
                   onReactivate={reactivateAccount}
                 />
@@ -1135,7 +1228,31 @@ function OverviewPage({ stats, loading, error, privacyMode, onRefresh }) {
   );
 }
 
-function AccountsPage({ accounts, loading, error, privacyMode, onRefresh, onDelete, onReactivate }) {
+function AccountsPage({
+  accounts,
+  loading,
+  error,
+  privacyMode,
+  proxies,
+  selectedProxyId,
+  setSelectedProxyId,
+  proxyImportText,
+  setProxyImportText,
+  proxyStatus,
+  proxyLoading,
+  proxyImporting,
+  proxyTestingId,
+  onRefresh,
+  onImportProxies,
+  onDeleteProxy,
+  onTestProxy,
+  onAssignProxy,
+  onDelete,
+  onReactivate,
+}) {
+  const selectedProxy = proxies.find((proxy) => proxy.id === selectedProxyId);
+  const proxyById = new Map(proxies.map((proxy) => [proxy.id, proxy]));
+
   return (
     <>
       <PageHeader title="Accounts" description="Connected Google accounts in the load-balanced rotation">
@@ -1143,14 +1260,98 @@ function AccountsPage({ accounts, loading, error, privacyMode, onRefresh, onDele
           <RefreshCcw className={cn(loading && "animate-spin")} data-icon="inline-start" />
           Refresh
         </Button>
-        <Button asChild size="sm">
-          <a href="/api/auth/login">
+        <Button asChild size="sm" className={!selectedProxyId ? "pointer-events-none opacity-50" : ""}>
+          <a href={selectedProxyId ? `/api/auth/login?proxyId=${encodeURIComponent(selectedProxyId)}` : "#"} aria-disabled={!selectedProxyId}>
             <ExternalLink data-icon="inline-start" />
             Connect Account
           </a>
         </Button>
       </PageHeader>
       <ErrorNotice>{error}</ErrorNotice>
+      <Card>
+        <CardHeader>
+          <CardTitle>Residential Proxies</CardTitle>
+          <CardDescription>Import IPRoyal proxies and choose one before connecting each Google account.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <form className="grid gap-3 lg:grid-cols-[1fr_auto]" onSubmit={onImportProxies}>
+            <Textarea
+              value={proxyImportText}
+              onChange={(event) => setProxyImportText(event.target.value)}
+              placeholder="host:port:username:password"
+              className="min-h-24 font-mono text-xs"
+            />
+            <div className="flex flex-col gap-2 lg:w-44">
+              <Button type="submit" disabled={proxyImporting || !proxyImportText.trim()}>
+                {proxyImporting ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Plus data-icon="inline-start" />}
+                Import
+              </Button>
+              <Button type="button" variant="outline" onClick={onRefresh} disabled={proxyLoading}>
+                <RefreshCcw className={cn(proxyLoading && "animate-spin")} data-icon="inline-start" />
+                Reload
+              </Button>
+            </div>
+          </form>
+          {proxyStatus ? <p className="text-sm text-muted-foreground">{proxyStatus}</p> : null}
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(260px,360px)]">
+            <div className="overflow-hidden rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Proxy</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {proxyLoading ? <TableEmpty colSpan={3}>Loading proxies...</TableEmpty> : null}
+                  {!proxyLoading && proxies.length === 0 ? <TableEmpty colSpan={3}>No proxies imported yet.</TableEmpty> : null}
+                  {!proxyLoading &&
+                    proxies.map((proxy) => (
+                      <TableRow key={proxy.id}>
+                        <TableCell>
+                          <div className="font-medium">{proxy.name}</div>
+                          {proxy.session ? <div className="text-xs text-muted-foreground">session {proxy.session}</div> : null}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{proxy.maskedUrl}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-2">
+                            <Button type="button" variant="outline" size="sm" onClick={() => onTestProxy(proxy.id)} disabled={proxyTestingId === proxy.id}>
+                              {proxyTestingId === proxy.id ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Activity data-icon="inline-start" />}
+                              Test
+                            </Button>
+                            <Button type="button" variant="ghost" size="sm" onClick={() => onDeleteProxy(proxy.id, proxy.name)} className="text-destructive hover:text-destructive">
+                              <Trash2 data-icon="inline-start" />
+                              Delete
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="rounded-md border p-3">
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Proxy for new account</span>
+                <select
+                  value={selectedProxyId}
+                  onChange={(event) => setSelectedProxyId(event.target.value)}
+                  className="h-10 rounded-md border bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+                >
+                  <option value="">Select proxy</option>
+                  {proxies.map((proxy) => (
+                    <option key={proxy.id} value={proxy.id}>{proxy.name}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="mt-3 text-xs text-muted-foreground">
+                {selectedProxy ? selectedProxy.maskedUrl : "Connect is locked until a proxy is selected."}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
       <Card className="overflow-hidden">
         <CardContent className="p-0">
           <Table>
@@ -1158,40 +1359,59 @@ function AccountsPage({ accounts, loading, error, privacyMode, onRefresh, onDele
               <TableRow>
                 <TableHead>Email</TableHead>
                 <TableHead>Project ID</TableHead>
+                <TableHead>Proxy</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Last Used</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {loading ? <TableEmpty colSpan={5}>Loading accounts...</TableEmpty> : null}
-              {!loading && accounts.length === 0 ? <TableEmpty colSpan={5}>No accounts connected yet.</TableEmpty> : null}
+              {loading ? <TableEmpty colSpan={6}>Loading accounts...</TableEmpty> : null}
+              {!loading && accounts.length === 0 ? <TableEmpty colSpan={6}>No accounts connected yet.</TableEmpty> : null}
               {!loading &&
-                accounts.map((account) => (
-                  <TableRow key={account.id || account.email}>
-                    <TableCell className="font-mono text-xs">
-                      {censorEmail(account.email, privacyMode)}
-                      {account.isPro ? <Badge className="ml-2">PRO</Badge> : null}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{account.projectId || "-"}</TableCell>
-                    <TableCell><StatusBadge active={account.isActive} /></TableCell>
-                    <TableCell className="text-muted-foreground">{formatTime(account.lastUsedAt)}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        {!account.isActive ? (
-                          <Button variant="outline" size="sm" onClick={() => onReactivate(account.id || account.email)}>
-                            <RotateCcw data-icon="inline-start" />
-                            Reactivate
+                accounts.map((account) => {
+                  const assignedProxy = proxyById.get(account.proxyId);
+                  return (
+                    <TableRow key={account.id || account.email}>
+                      <TableCell className="font-mono text-xs">
+                        {censorEmail(account.email, privacyMode)}
+                        {account.isPro ? <Badge className="ml-2">PRO</Badge> : null}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{account.projectId || "-"}</TableCell>
+                      <TableCell>
+                        <div className="grid gap-1">
+                          <select
+                            value={account.proxyId || ""}
+                            onChange={(event) => onAssignProxy(account.id || account.email, event.target.value)}
+                            className="h-9 rounded-md border bg-background px-2 text-xs outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+                          >
+                            <option value="">No proxy</option>
+                            {proxies.map((proxy) => (
+                              <option key={proxy.id} value={proxy.id}>{proxy.name}</option>
+                            ))}
+                          </select>
+                          <span className="text-xs text-muted-foreground">{assignedProxy?.maskedUrl || "Direct IP disabled"}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell><StatusBadge active={account.isActive} /></TableCell>
+                      <TableCell className="text-muted-foreground">{formatTime(account.lastUsedAt)}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-2">
+                          {!account.isActive ? (
+                            <Button variant="outline" size="sm" onClick={() => onReactivate(account.id || account.email)}>
+                              <RotateCcw data-icon="inline-start" />
+                              Reactivate
+                            </Button>
+                          ) : null}
+                          <Button variant="ghost" size="sm" onClick={() => onDelete(account.id || account.email)} className="text-destructive hover:text-destructive">
+                            <Trash2 data-icon="inline-start" />
+                            Remove
                           </Button>
-                        ) : null}
-                        <Button variant="ghost" size="sm" onClick={() => onDelete(account.id || account.email)} className="text-destructive hover:text-destructive">
-                          <Trash2 data-icon="inline-start" />
-                          Remove
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
             </TableBody>
           </Table>
         </CardContent>

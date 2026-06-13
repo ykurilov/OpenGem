@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { getDatabase, invalidateDbCache } from './services/database';
+import type { Account, AccountProxy } from './services/database';
 import { requireAdmin } from './middleware/auth';
 import { isConfigured, getConfig, saveConfig, generateJwtSecret, generateApiKey, verifyUsername, switchDatabaseBackend, updateAdminCredentials } from './services/config';
 import {
@@ -18,13 +19,13 @@ import {
     exchangeCodeForTokens,
     discoverProjectId,
     getUserEmail,
-    refreshAccessToken,
     checkAccountTier,
-    GEMINI_API_BASE,
     DEFAULT_MODEL
 } from './services/antigravity';
 import { warmAccountCache, invalidateAccountCache } from './services/account-manager';
 import { hashAffinityValue } from './services/account-affinity';
+import { nativeFetch } from './services/http';
+import { parseProxyInput, proxyDisplayName, sanitizeProxyError } from './services/proxy';
 
 dotenv.config();
 
@@ -292,7 +293,40 @@ app.post('/api/admin/credentials', requireAdmin, async (req, res) => {
 });
 
 // Simple in-memory store for PKCE verifiers keyed by state parameter
-const authStates = new Map<string, string>();
+const authStates = new Map<string, { verifier: string; proxyId: string }>();
+
+function sanitizeAccount(account: Account) {
+    const { accessToken, refreshToken, proxyUrl, ...safeAccount } = account;
+    return safeAccount;
+}
+
+function publicProxy(proxy: AccountProxy) {
+    const parsed = parseProxyInput(proxy.url);
+    return {
+        id: proxy.id,
+        name: proxy.name,
+        host: proxy.host || parsed.host,
+        port: proxy.port || parsed.port,
+        username: proxy.username || parsed.username,
+        session: proxy.session || parsed.session,
+        maskedUrl: parsed.maskedUrl,
+        createdAt: proxy.createdAt,
+        updatedAt: proxy.updatedAt,
+    };
+}
+
+async function buildProxyFromInput(value: string, name?: string, id?: string): Promise<AccountProxy> {
+    const parsed = parseProxyInput(value);
+    return {
+        id: id || crypto.randomBytes(12).toString('hex'),
+        name: (name || '').trim() || proxyDisplayName(parsed),
+        url: parsed.normalizedUrl,
+        host: parsed.host,
+        port: parsed.port,
+        username: parsed.username,
+        session: parsed.session,
+    };
+}
 
 /**
  * Extract an API key from the request, supporting all four conventions used
@@ -370,25 +404,40 @@ const requireApiKey = makeApiKeyMiddleware('gemini');
 // --- AUTH ROUTES ---
 
 // 1. Redirect to Google Consent screen
-app.get('/api/auth/login', requireAdmin, (req, res) => {
-    const { verifier, challenge } = generatePkce();
-    // Separate cryptographic state parameter for CSRF protection
-    const state = crypto.randomBytes(32).toString('hex');
-    authStates.set(state, verifier);
+app.get('/api/auth/login', requireAdmin, async (req, res) => {
+    try {
+        const proxyId = String(req.query.proxyId || '').trim();
+        if (!proxyId) {
+            return res.status(400).send('A proxy must be selected before connecting an account.');
+        }
 
-    const params = new URLSearchParams({
-        client_id: OAUTH_CONFIG.clientId,
-        response_type: 'code',
-        redirect_uri: OAUTH_CONFIG.redirectUri,
-        scope: OAUTH_CONFIG.scopes.join(' '),
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        state: state,
-        access_type: 'offline',
-        prompt: 'consent',
-    });
+        const proxy = await getDatabase().getProxy(proxyId);
+        if (!proxy) {
+            return res.status(400).send('Selected proxy was not found.');
+        }
 
-    res.redirect(`${OAUTH_CONFIG.authUrl}?${params.toString()}`);
+        const { verifier, challenge } = generatePkce();
+        // Separate cryptographic state parameter for CSRF protection
+        const state = crypto.randomBytes(32).toString('hex');
+        authStates.set(state, { verifier, proxyId: proxy.id });
+
+        const params = new URLSearchParams({
+            client_id: OAUTH_CONFIG.clientId,
+            response_type: 'code',
+            redirect_uri: OAUTH_CONFIG.redirectUri,
+            scope: OAUTH_CONFIG.scopes.join(' '),
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+            state: state,
+            access_type: 'offline',
+            prompt: 'consent',
+        });
+
+        res.redirect(`${OAUTH_CONFIG.authUrl}?${params.toString()}`);
+    } catch (err: any) {
+        console.error('OAuth login error:', sanitizeProxyError(err));
+        res.status(500).send('Failed to start OAuth flow.');
+    }
 });
 
 // 2. Callback from Google
@@ -399,22 +448,28 @@ app.get('/api/auth/callback', async (req, res) => {
         return res.status(400).send(`OAuth Error: ${error || 'Missing parameters'}`);
     }
 
-    const verifier = authStates.get(state as string);
-    if (!verifier) {
+    const authState = authStates.get(state as string);
+    if (!authState) {
         return res.status(400).send('Invalid or expired authentication state.');
     }
     authStates.delete(state as string);
 
     try {
+        const proxy = await getDatabase().getProxy(authState.proxyId);
+        if (!proxy) {
+            throw new Error('Selected account proxy is no longer available.');
+        }
+        const proxyUrl = proxy.url;
+
         // Exchange code
-        const tokens = await exchangeCodeForTokens(code as string, verifier);
+        const tokens = await exchangeCodeForTokens(code as string, authState.verifier, proxyUrl);
 
         // Discover project ID and Email
-        const email = await getUserEmail(tokens.accessToken);
-        const projectId = await discoverProjectId(tokens.accessToken);
+        const email = await getUserEmail(tokens.accessToken, proxyUrl);
+        const projectId = await discoverProjectId(tokens.accessToken, proxyUrl);
 
         // Check account tier
-        const { isPro, tierName } = await checkAccountTier(tokens.accessToken);
+        const { isPro, tierName } = await checkAccountTier(tokens.accessToken, proxyUrl);
 
         // Upsert into database
         await getDatabase().upsertAccount({
@@ -428,13 +483,15 @@ app.get('/api/auth/callback', async (req, res) => {
             isPro,
             tierName,
             lastUsedAt: new Date(),
+            proxyId: proxy.id,
         });
         invalidateAccountCache(); // Newly added account should be available immediately
 
         res.redirect('/');
     } catch (err: any) {
-        console.error('Callback error:', err);
-        const errMsg = process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : `Authentication failed: ${err.message}`;
+        const safeError = sanitizeProxyError(err);
+        console.error('Callback error:', safeError);
+        const errMsg = process.env.NODE_ENV === 'production' ? 'Authentication failed. Please try again.' : `Authentication failed: ${safeError}`;
         res.status(500).send(errMsg);
     }
 });
@@ -443,7 +500,7 @@ app.get('/api/auth/callback', async (req, res) => {
 
 app.get('/api/accounts', requireAdmin, async (req, res) => {
     const accounts = await getDatabase().getAllAccounts();
-    res.json(accounts);
+    res.json(accounts.map(sanitizeAccount));
 });
 
 app.put('/api/accounts/:id/reactivate', requireAdmin, async (req, res) => {
@@ -456,6 +513,139 @@ app.delete('/api/accounts/:id', requireAdmin, async (req, res) => {
     await getDatabase().deleteAccount(String(req.params.id));
     invalidateAccountCache(); // Sync in-memory account list
     res.json({ success: true });
+});
+
+app.put('/api/accounts/:id/proxy', requireAdmin, async (req, res) => {
+    try {
+        const proxyId = String(req.body?.proxyId || '').trim();
+        if (!proxyId) {
+            return res.status(400).json({ error: 'proxyId is required.' });
+        }
+        const proxy = await getDatabase().getProxy(proxyId);
+        if (!proxy) {
+            return res.status(404).json({ error: 'Proxy not found.' });
+        }
+        await getDatabase().updateAccount(String(req.params.id), { proxyId: proxy.id });
+        invalidateAccountCache();
+        res.json({ success: true, proxy: publicProxy(proxy) });
+    } catch (err: any) {
+        console.error('Assign account proxy error:', sanitizeProxyError(err));
+        res.status(500).json({ error: 'Failed to assign account proxy.' });
+    }
+});
+
+// --- ACCOUNT PROXY ROUTES ---
+
+app.get('/api/proxies', requireAdmin, async (req, res) => {
+    try {
+        const proxies = await getDatabase().getAllProxies();
+        res.json(proxies.map(publicProxy));
+    } catch (err: any) {
+        console.error('Get proxies error:', sanitizeProxyError(err));
+        res.status(500).json({ error: 'Failed to fetch proxies.' });
+    }
+});
+
+app.post('/api/proxies', requireAdmin, async (req, res) => {
+    try {
+        const value = String(req.body?.value || '').trim();
+        const name = typeof req.body?.name === 'string' ? req.body.name : undefined;
+        const proxy = await buildProxyFromInput(value, name);
+        const saved = await getDatabase().upsertProxy(proxy);
+        res.json(publicProxy(saved));
+    } catch (err: any) {
+        console.error('Create proxy error:', sanitizeProxyError(err));
+        res.status(400).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.post('/api/proxies/bulk', requireAdmin, async (req, res) => {
+    try {
+        const text = String(req.body?.text || '');
+        const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        if (lines.length === 0) {
+            return res.status(400).json({ error: 'No proxy lines provided.' });
+        }
+
+        const saved: AccountProxy[] = [];
+        const errors: Array<{ line: number; error: string }> = [];
+        for (let i = 0; i < lines.length; i++) {
+            try {
+                const proxy = await buildProxyFromInput(lines[i]);
+                saved.push(await getDatabase().upsertProxy(proxy));
+            } catch (err) {
+                errors.push({ line: i + 1, error: sanitizeProxyError(err) });
+            }
+        }
+
+        res.json({ proxies: saved.map(publicProxy), errors });
+    } catch (err: any) {
+        console.error('Bulk proxy import error:', sanitizeProxyError(err));
+        res.status(500).json({ error: 'Failed to import proxies.' });
+    }
+});
+
+app.put('/api/proxies/:id', requireAdmin, async (req, res) => {
+    try {
+        const existing = await getDatabase().getProxy(String(req.params.id));
+        if (!existing) {
+            return res.status(404).json({ error: 'Proxy not found.' });
+        }
+        const value = typeof req.body?.value === 'string' && req.body.value.trim()
+            ? req.body.value
+            : existing.url;
+        const name = typeof req.body?.name === 'string' && req.body.name.trim()
+            ? req.body.name
+            : existing.name;
+        const proxy = await buildProxyFromInput(value, name, existing.id);
+        const saved = await getDatabase().upsertProxy(proxy);
+        invalidateAccountCache();
+        res.json(publicProxy(saved));
+    } catch (err: any) {
+        console.error('Update proxy error:', sanitizeProxyError(err));
+        res.status(400).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.delete('/api/proxies/:id', requireAdmin, async (req, res) => {
+    try {
+        const proxyId = String(req.params.id);
+        const accounts = await getDatabase().getAllAccounts();
+        const inUse = accounts.filter(account => account.proxyId === proxyId);
+        if (inUse.length > 0) {
+            return res.status(400).json({ error: `Proxy is assigned to ${inUse.length} account(s). Replace those assignments first.` });
+        }
+        await getDatabase().deleteProxy(proxyId);
+        invalidateAccountCache();
+        res.json({ success: true });
+    } catch (err: any) {
+        console.error('Delete proxy error:', sanitizeProxyError(err));
+        res.status(500).json({ error: 'Failed to delete proxy.' });
+    }
+});
+
+app.post('/api/proxies/:id/test', requireAdmin, async (req, res) => {
+    try {
+        const proxy = await getDatabase().getProxy(String(req.params.id));
+        if (!proxy) {
+            return res.status(404).json({ error: 'Proxy not found.' });
+        }
+        const response = await nativeFetch('https://api.ipify.org?format=json', {
+            proxyUrl: proxy.url,
+            timeoutMs: 30000,
+        });
+        const body = response.ok ? await response.json() : { error: await response.text() };
+        res.status(response.ok ? 200 : 502).json({
+            ok: response.ok,
+            status: response.status,
+            ip: body?.ip,
+            proxy: publicProxy(proxy),
+            error: response.ok ? undefined : 'Proxy test failed.',
+        });
+    } catch (err: any) {
+        console.error('Proxy test error:', sanitizeProxyError(err));
+        res.status(502).json({ ok: false, error: sanitizeProxyError(err) });
+    }
 });
 
 // --- API KEYS ROUTES ---
@@ -567,6 +757,11 @@ app.post('/api/admin/db-switch', requireAdmin, async (req, res) => {
             await targetDb.upsertAccount(account);
         }
 
+        const proxies = await sourceDb.getAllProxies();
+        for (const proxy of proxies) {
+            await targetDb.upsertProxy(proxy);
+        }
+
         // Migrate API keys (re-create by name; we lost the original key text so regenerate)
         // Note: we cannot migrate key hashes cross-backend since we don't store the raw key.
         // Instead we copy the metadata, flagging that users may need to regenerate keys.
@@ -595,12 +790,12 @@ app.post('/api/admin/db-switch', requireAdmin, async (req, res) => {
             });
         }
 
-        console.log(`✅ Migration complete. ${accounts.length} accounts, ${logs.length} logs migrated.`);
+        console.log(`✅ Migration complete. ${accounts.length} accounts, ${proxies.length} proxies, ${logs.length} logs migrated.`);
 
         res.json({
             success: true,
             backend: to,
-            migrated: { accounts: accounts.length, logs: logs.length },
+            migrated: { accounts: accounts.length, proxies: proxies.length, logs: logs.length },
             note: 'API keys could not be automatically migrated. Please regenerate them in the Keys tab.',
         });
 

@@ -53,6 +53,10 @@ export async function getReadyAccounts(): Promise<Account[]> {
  * only one HTTP call is made and both receive the result.
  */
 export async function ensureFreshToken(account: Account): Promise<string> {
+    if (!account.proxyUrl) {
+        throw new Error('Account proxy is not configured; direct IP fallback is disabled.');
+    }
+
     const tokenExpireTime =
         account.expiresAt instanceof Date
             ? account.expiresAt.getTime()
@@ -71,7 +75,7 @@ export async function ensureFreshToken(account: Account): Promise<string> {
     const refreshPromise = (async () => {
         console.log(`🔄 Refreshing token for ${account.email}...`);
         try {
-            const newTokens = await refreshAccessToken(account.refreshToken);
+            const newTokens = await refreshAccessToken(account.refreshToken, account.proxyUrl);
             await db.updateAccount(account.email, {
                 accessToken: newTokens.accessToken,
                 refreshToken: newTokens.refreshToken,
@@ -83,6 +87,8 @@ export async function ensureFreshToken(account: Account): Promise<string> {
                 cached.accessToken = newTokens.accessToken;
                 cached.refreshToken = newTokens.refreshToken;
                 cached.expiresAt = newTokens.expiresAt;
+                cached.proxyId = account.proxyId;
+                cached.proxyUrl = account.proxyUrl;
             }
             return newTokens.accessToken;
         } finally {

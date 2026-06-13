@@ -17,7 +17,7 @@ import {
     Firestore
 } from 'firebase/firestore';
 import { getConfig, encrypt, decrypt } from './config';
-import type { IDatabase, Account, ApiKey, RequestLog, DbStats } from './database';
+import type { IDatabase, Account, AccountProxy, ApiKey, RequestLog, DbStats } from './database';
 import { mergeEffectiveTokenStats } from './token-stats';
 import crypto from 'crypto';
 
@@ -48,6 +48,7 @@ function getDb(): Firestore {
 const ACCOUNTS_COLLECTION = 'accounts';
 const LOGS_COLLECTION = 'request_logs';
 const API_KEYS_COLLECTION = 'api_keys';
+const PROXIES_COLLECTION = 'account_proxies';
 
 // Secure one-way hash for API key storage
 function hashApiKey(key: string): string {
@@ -92,7 +93,34 @@ function mapDocToAccount(doc: any): Account {
     } as Account;
 }
 
-export type { Account, ApiKey, RequestLog, DbStats };
+function mapDocToProxy(docSnap: any): AccountProxy {
+    const data = docSnap.data();
+    return {
+        id: docSnap.id,
+        name: data.name,
+        url: data.url ? decrypt(data.url) : '',
+        host: data.host,
+        port: Number(data.port),
+        username: data.username,
+        session: data.session || undefined,
+        createdAt: toDate(data.createdAt),
+        updatedAt: toDate(data.updatedAt),
+    };
+}
+
+async function attachProxyUrls(accounts: Account[]): Promise<Account[]> {
+    const needsProxy = accounts.some(account => !!account.proxyId);
+    if (!needsProxy) return accounts;
+
+    const proxies = await firebaseDb.getAllProxies();
+    const byId = new Map(proxies.map(proxy => [proxy.id, proxy.url]));
+    return accounts.map(account => ({
+        ...account,
+        proxyUrl: account.proxyId ? byId.get(account.proxyId) : undefined,
+    }));
+}
+
+export type { Account, ApiKey, RequestLog, DbStats, AccountProxy };
 
 export const firebaseDb: IDatabase = {
     async getActiveAccounts(): Promise<Account[]> {
@@ -110,7 +138,7 @@ export const firebaseDb: IDatabase = {
         });
 
         // Sort by least recently used (ascending priority)
-        return accounts.sort((a, b) => new Date(a.lastUsedAt).getTime() - new Date(b.lastUsedAt).getTime());
+        return attachProxyUrls(accounts.sort((a, b) => new Date(a.lastUsedAt).getTime() - new Date(b.lastUsedAt).getTime()));
     },
 
     async getAllAccounts(): Promise<Account[]> {
@@ -122,14 +150,15 @@ export const firebaseDb: IDatabase = {
             accounts.push(mapDocToAccount(doc));
         });
 
-        return accounts.sort((a, b) => new Date(a.lastUsedAt).getTime() - new Date(b.lastUsedAt).getTime());
+        return attachProxyUrls(accounts.sort((a, b) => new Date(a.lastUsedAt).getTime() - new Date(b.lastUsedAt).getTime()));
     },
 
     async upsertAccount(account: Account): Promise<void> {
         const docRef = doc(getDb(), ACCOUNTS_COLLECTION, account.email); // Using email as ID
 
+        const { proxyUrl, ...accountToSave } = account;
         const dataToSave: any = {
-            ...account,
+            ...accountToSave,
             accessToken: encrypt(account.accessToken),
             refreshToken: encrypt(account.refreshToken),
             updatedAt: new Date()
@@ -146,7 +175,8 @@ export const firebaseDb: IDatabase = {
 
     async updateAccount(email: string, data: Partial<Account>): Promise<void> {
         const docRef = doc(getDb(), ACCOUNTS_COLLECTION, email);
-        const encryptedData: any = { ...data, updatedAt: new Date() };
+        const { proxyUrl, ...dataToSave } = data;
+        const encryptedData: any = { ...dataToSave, updatedAt: new Date() };
         if (encryptedData.accessToken) encryptedData.accessToken = encrypt(encryptedData.accessToken);
         if (encryptedData.refreshToken) encryptedData.refreshToken = encrypt(encryptedData.refreshToken);
         await setDoc(docRef, sanitize(encryptedData), { merge: true });
@@ -202,6 +232,48 @@ export const firebaseDb: IDatabase = {
 
     async deleteAccount(idOrEmail: string): Promise<void> {
         const docRef = doc(getDb(), ACCOUNTS_COLLECTION, idOrEmail);
+        await deleteDoc(docRef);
+    },
+
+    // --- ACCOUNT PROXIES ---
+
+    async getAllProxies(): Promise<AccountProxy[]> {
+        const proxiesRef = collection(getDb(), PROXIES_COLLECTION);
+        const snapshot = await getDocs(proxiesRef);
+        const proxies: AccountProxy[] = [];
+        snapshot.forEach(docSnap => {
+            proxies.push(mapDocToProxy(docSnap));
+        });
+        return proxies.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    },
+
+    async getProxy(id: string): Promise<AccountProxy | null> {
+        const docRef = doc(getDb(), PROXIES_COLLECTION, id);
+        const snapshot = await getDoc(docRef);
+        return snapshot.exists() ? mapDocToProxy(snapshot) : null;
+    },
+
+    async upsertProxy(proxy: AccountProxy): Promise<AccountProxy> {
+        const id = proxy.id || crypto.randomBytes(12).toString('hex');
+        const docRef = doc(getDb(), PROXIES_COLLECTION, id);
+        const existingDoc = await getDoc(docRef);
+        const now = new Date();
+        const dataToSave = {
+            name: proxy.name,
+            url: encrypt(proxy.url),
+            host: proxy.host,
+            port: proxy.port,
+            username: proxy.username,
+            session: proxy.session || null,
+            createdAt: existingDoc.exists() ? existingDoc.data().createdAt : now,
+            updatedAt: now,
+        };
+        await setDoc(docRef, sanitize(dataToSave), { merge: true });
+        return { ...proxy, id, createdAt: dataToSave.createdAt as any, updatedAt: now };
+    },
+
+    async deleteProxy(id: string): Promise<void> {
+        const docRef = doc(getDb(), PROXIES_COLLECTION, id);
         await deleteDoc(docRef);
     },
 

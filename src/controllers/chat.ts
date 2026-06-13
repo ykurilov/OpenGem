@@ -89,6 +89,14 @@ function buildPayload(contents: any[], generationConfig?: any, systemInstruction
     return p;
 }
 
+function getAccountProxyUrl(account: { email: string; proxyUrl?: string }): string | null {
+    if (!account.proxyUrl) {
+        console.warn(`🚫 ${account.email} has no assigned proxy. Direct IP fallback is disabled.`);
+        return null;
+    }
+    return account.proxyUrl;
+}
+
 function extractText(candidate: any): string {
     return (candidate?.content?.parts ?? [])
         .map((p: any) => {
@@ -286,6 +294,11 @@ export async function generateContentWithAccounts(
 
             try {
                 reserveAffinityAccount(affinity, account.email);
+                const proxyUrl = getAccountProxyUrl(account);
+                if (!proxyUrl) {
+                    releaseAffinityReservation(affinity, account.email);
+                    continue;
+                }
                 const token = await ensureFreshToken(account);
                 const requestPayload = buildPayload(contents, generationConfig, systemInstruction, tools, toolConfig);
                 let usedModel = model || DEFAULT_MODEL;
@@ -301,6 +314,7 @@ export async function generateContentWithAccounts(
                         method: 'POST', headers: buildHeaders(token),
                         body: JSON.stringify(geminiBody(usedModel)),
                         timeoutMs: GENERATE_CONTENT_TIMEOUT_MS,
+                        proxyUrl,
                     })
                 );
 
@@ -539,6 +553,11 @@ export async function streamGeminiWithSink(opts: StreamWithSinkOptions): Promise
 
             try {
                 reserveAffinityAccount(affinity, account.email);
+                const proxyUrl = getAccountProxyUrl(account);
+                if (!proxyUrl) {
+                    releaseAffinityReservation(affinity, account.email);
+                    continue;
+                }
                 const token = await ensureFreshToken(account);
                 const requestPayload = buildPayload(contents, generationConfig, systemInstruction, tools, toolConfig);
                 let usedModel = requestedModel;
@@ -552,6 +571,7 @@ export async function streamGeminiWithSink(opts: StreamWithSinkOptions): Promise
                 let { status, stream } = await geminiStreamSemaphore.run(() => nativeFetchStream(`${GEMINI_API_BASE}:streamGenerateContent?alt=sse`, {
                     method: 'POST', headers: buildHeaders(token),
                     body: JSON.stringify(geminiBody(usedModel)),
+                    proxyUrl,
                 }));
 
                 if (status === 429) {

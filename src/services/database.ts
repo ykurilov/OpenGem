@@ -41,6 +41,21 @@ export interface Account {
     successfulRequests?: number;
     failedRequests?: number;
     totalTokensUsed?: number;
+    proxyId?: string;
+    /** Internal only: decrypted proxy URL attached by database backends. */
+    proxyUrl?: string;
+}
+
+export interface AccountProxy {
+    id: string;
+    name: string;
+    url: string;
+    host: string;
+    port: number;
+    username: string;
+    session?: string;
+    createdAt?: Date | number;
+    updatedAt?: Date | number;
 }
 
 export interface ApiKey {
@@ -79,6 +94,11 @@ export interface IDatabase {
     reactivateExhaustedAccounts(cooldownMs: number): Promise<number>;
     reactivateAccount(email: string): Promise<void>;
     deleteAccount(idOrEmail: string): Promise<void>;
+
+    getAllProxies(): Promise<AccountProxy[]>;
+    getProxy(id: string): Promise<AccountProxy | null>;
+    upsertProxy(proxy: AccountProxy): Promise<AccountProxy>;
+    deleteProxy(id: string): Promise<void>;
 
     createApiKey(name: string, key: string): Promise<ApiKey>;
     getAllApiKeys(): Promise<ApiKey[]>;

@@ -39,7 +39,7 @@ export function generatePkce() {
     return { verifier, challenge };
 }
 
-export async function discoverProjectId(accessToken: string): Promise<string> {
+export async function discoverProjectId(accessToken: string, proxyUrl?: string): Promise<string> {
     const headers = {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
@@ -50,6 +50,7 @@ export async function discoverProjectId(accessToken: string): Promise<string> {
         const loadResponse = await nativeFetch(`${CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`, {
             method: 'POST',
             headers,
+            proxyUrl,
             body: JSON.stringify({
                 metadata: {
                     ideType: 'IDE_UNSPECIFIED',
@@ -71,6 +72,7 @@ export async function discoverProjectId(accessToken: string): Promise<string> {
         const onboardResponse = await nativeFetch(`${CODE_ASSIST_ENDPOINT}/v1internal:onboardUser`, {
             method: 'POST',
             headers,
+            proxyUrl,
             body: JSON.stringify({
                 tierId: 'free-tier',
                 metadata: {
@@ -94,10 +96,11 @@ export async function discoverProjectId(accessToken: string): Promise<string> {
     }
 }
 
-export async function exchangeCodeForTokens(code: string, verifier: string) {
+export async function exchangeCodeForTokens(code: string, verifier: string, proxyUrl?: string) {
     const response = await nativeFetch(OAUTH_CONFIG.tokenUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        proxyUrl,
         body: new URLSearchParams({
             client_id: OAUTH_CONFIG.clientId,
             client_secret: OAUTH_CONFIG.clientSecret,
@@ -120,7 +123,7 @@ export async function exchangeCodeForTokens(code: string, verifier: string) {
     };
 }
 
-export async function refreshAccessToken(refreshToken: string) {
+export async function refreshAccessToken(refreshToken: string, proxyUrl?: string) {
     const refreshParams = new URLSearchParams({
         client_id: OAUTH_CONFIG.clientId,
         client_secret: OAUTH_CONFIG.clientSecret,
@@ -131,6 +134,7 @@ export async function refreshAccessToken(refreshToken: string) {
     const response = await nativeFetch(OAUTH_CONFIG.tokenUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        proxyUrl,
         body: refreshParams.toString(),
     });
 
@@ -147,8 +151,9 @@ export async function refreshAccessToken(refreshToken: string) {
     };
 }
 
-export async function getUserEmail(accessToken: string): Promise<string> {
+export async function getUserEmail(accessToken: string, proxyUrl?: string): Promise<string> {
     const response = await nativeFetch(OAUTH_CONFIG.userInfoUrl, {
+        proxyUrl,
         headers: { Authorization: `Bearer ${accessToken}` }
     });
     if (!response.ok) {
@@ -158,7 +163,7 @@ export async function getUserEmail(accessToken: string): Promise<string> {
     return data.email;
 }
 
-export async function checkAccountTier(accessToken: string): Promise<{ isPro: boolean, tierName: string }> {
+export async function checkAccountTier(accessToken: string, proxyUrl?: string): Promise<{ isPro: boolean, tierName: string }> {
     try {
         const headers = {
             'Authorization': `Bearer ${accessToken}`,
@@ -168,6 +173,7 @@ export async function checkAccountTier(accessToken: string): Promise<{ isPro: bo
         const loadResponse = await nativeFetch(`${CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`, {
             method: 'POST',
             headers,
+            proxyUrl,
             body: JSON.stringify({
                 metadata: {
                     ideType: 'IDE_UNSPECIFIED',
