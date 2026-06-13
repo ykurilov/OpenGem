@@ -66,6 +66,7 @@
 - [x] Run `npm run build`.
 - [x] Run `git diff --check`.
 - [x] Confirm no real proxy credentials are committed.
-- [ ] Commit and push the branch.
-- [ ] Rsync to Amsterdam server and rebuild Docker image.
-- [ ] Verify container health, public `/accounts`, proxy count, and auth-browser code markers.
+- [x] Commit and push the branch.
+- [x] Rsync to Amsterdam server and rebuild Docker image.
+- [x] Verify container health, public `/accounts`, proxy count, and auth-browser code markers.
+- [x] Smoke-test server-side Chromium screenshot capture through an assigned proxy.
