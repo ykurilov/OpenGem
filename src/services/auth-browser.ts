@@ -150,7 +150,7 @@ export async function startAuthBrowserSession(input: {
 
 async function navigateAuthBrowserSession(session: AuthBrowserSession, authUrl: string): Promise<void> {
     try {
-        await session.page.goto(authUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        await session.page.goto(authUrl, { waitUntil: 'commit', timeout: 15_000 });
         if (session.status === 'starting') {
             session.status = 'ready';
         }
@@ -177,16 +177,24 @@ export function getAuthBrowserSession(id: string): PublicAuthBrowserSession | nu
 
 export async function captureAuthBrowserSession(id: string): Promise<PublicAuthBrowserSession & { image: string }> {
     const session = requireSession(id);
-    const image = await session.page.screenshot({
-        type: 'jpeg',
-        quality: 72,
-        fullPage: false,
-        timeout: 15_000,
-    });
+    let image = '';
+    let screenshotError = '';
+    try {
+        const buffer = await session.page.screenshot({
+            type: 'jpeg',
+            quality: 72,
+            fullPage: false,
+            timeout: 5_000,
+        });
+        image = `data:image/jpeg;base64,${buffer.toString('base64')}`;
+    } catch (err) {
+        screenshotError = `Browser frame is not ready yet: ${sanitizeProxyError(err)}`;
+    }
     session.currentUrl = session.page.url();
     return {
         ...publicSession(session),
-        image: `data:image/jpeg;base64,${image.toString('base64')}`,
+        error: screenshotError || session.error,
+        image,
     };
 }
 
