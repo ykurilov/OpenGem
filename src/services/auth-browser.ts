@@ -5,6 +5,10 @@ import os from 'os';
 import path from 'path';
 
 import { chromium, type BrowserContext, type Page } from 'playwright-core';
+const ProxyChain: {
+    anonymizeProxy(proxyUrl: string): Promise<string>;
+    closeAnonymizedProxy(proxyUrl: string, closeConnections?: boolean): Promise<void>;
+} = require('proxy-chain');
 
 import type { AccountProxy } from './database';
 import { parseProxyInput, sanitizeProxyError } from './proxy';
@@ -30,6 +34,7 @@ interface AuthBrowserSession {
     context: BrowserContext;
     page: Page;
     userDataDir: string;
+    browserProxyUrl: string;
     xvfb?: ChildProcessWithoutNullStreams;
     closeTimer: NodeJS.Timeout;
 }
@@ -60,7 +65,7 @@ export async function startAuthBrowserSession(input: {
     await enforceSessionLimit();
 
     const parsedProxy = parseProxyInput(input.proxy.url);
-    const proxyUrl = new URL(parsedProxy.normalizedUrl);
+    const browserProxyUrl = await ProxyChain.anonymizeProxy(parsedProxy.normalizedUrl);
     const userDataDir = path.join(TEMP_ROOT, input.id);
     fs.mkdirSync(userDataDir, { recursive: true });
     const browserEnv = {
@@ -86,9 +91,7 @@ export async function startAuthBrowserSession(input: {
             viewport: VIEWPORT,
             env: USE_HEADLESS_BROWSER ? browserEnv : { ...browserEnv, DISPLAY: display },
             proxy: {
-                server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
-                username: decodeURIComponent(proxyUrl.username),
-                password: decodeURIComponent(proxyUrl.password),
+                server: browserProxyUrl,
             },
             ignoreDefaultArgs: ['--enable-automation'],
             args: [
@@ -108,6 +111,7 @@ export async function startAuthBrowserSession(input: {
         });
     } catch (err) {
         xvfb?.kill('SIGTERM');
+        await ProxyChain.closeAnonymizedProxy(browserProxyUrl, true).catch(() => undefined);
         fs.rmSync(userDataDir, { recursive: true, force: true });
         throw err;
     }
@@ -125,6 +129,7 @@ export async function startAuthBrowserSession(input: {
         context,
         page,
         userDataDir,
+        browserProxyUrl,
         xvfb,
         closeTimer: setTimeout(() => {
             void stopAuthBrowserSession(input.id);
@@ -250,6 +255,7 @@ export async function stopAuthBrowserSession(id: string): Promise<void> {
     clearTimeout(session.closeTimer);
     session.status = 'closed';
     await session.context.close().catch(() => undefined);
+    await ProxyChain.closeAnonymizedProxy(session.browserProxyUrl, true).catch(() => undefined);
     session.xvfb?.kill('SIGTERM');
     fs.rmSync(session.userDataDir, { recursive: true, force: true });
 }

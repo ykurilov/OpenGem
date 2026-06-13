@@ -61,6 +61,7 @@
     "next": "^16.2.6",
     "node-fetch": "^2.7.0",
     "playwright-core": "^1.60.0",
+    "proxy-chain": "^3.0.0",
     "radix-ui": "^1.4.3",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
