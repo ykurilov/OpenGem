@@ -94,11 +94,11 @@ export async function startAuthBrowserSession(input: {
             args: [
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-crash-reporter',
-            '--disable-crashpad',
-            '--disable-extensions',
-            '--disable-background-networking',
+                '--disable-gpu',
+                '--disable-crash-reporter',
+                '--disable-crashpad',
+                '--disable-extensions',
+                '--disable-background-networking',
                 '--disable-default-apps',
                 '--disable-sync',
                 '--no-first-run',
@@ -143,16 +143,31 @@ export async function startAuthBrowserSession(input: {
         }
     });
 
+    void navigateAuthBrowserSession(session, input.authUrl);
+
+    return publicSession(session);
+}
+
+async function navigateAuthBrowserSession(session: AuthBrowserSession, authUrl: string): Promise<void> {
     try {
-        await page.goto(input.authUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-        session.status = 'ready';
-        session.currentUrl = page.url();
+        await session.page.goto(authUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+        if (session.status === 'starting') {
+            session.status = 'ready';
+        }
+        session.currentUrl = session.page.url();
     } catch (err) {
+        session.currentUrl = session.page.url();
+        if (session.status === 'closed' || session.status === 'completed') {
+            return;
+        }
+        if (session.currentUrl && session.currentUrl !== 'about:blank') {
+            session.status = 'ready';
+            session.error = `Navigation is still loading: ${sanitizeProxyError(err)}`;
+            return;
+        }
         session.status = 'error';
         session.error = sanitizeProxyError(err);
     }
-
-    return publicSession(session);
 }
 
 export function getAuthBrowserSession(id: string): PublicAuthBrowserSession | null {

@@ -747,7 +747,7 @@ export function OpenGemConsole() {
 
   async function startAuthBrowser() {
     if (!selectedProxyId) return;
-    setAuthBrowserStatus("");
+    setAuthBrowserStatus("Starting remote browser...");
     setAuthBrowserImage("");
     setLoadingKey("authBrowser", true);
     try {
@@ -757,7 +757,7 @@ export function OpenGemConsole() {
       });
       authBrowserCompletedRef.current = false;
       setAuthBrowserSession(session);
-      setAuthBrowserStatus(`Remote browser started through ${session.proxyName}.`);
+      setAuthBrowserStatus(`Remote browser ${session.status} through ${session.proxyName}.`);
     } catch (err) {
       setAuthBrowserStatus(err.message);
     } finally {
