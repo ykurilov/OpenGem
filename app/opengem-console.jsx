@@ -10,7 +10,6 @@ import {
   Clipboard,
   Copy,
   Database,
-  ExternalLink,
   Gauge,
   KeyRound,
   Loader2,
@@ -447,6 +446,10 @@ export function OpenGemConsole() {
   const [proxyTestingId, setProxyTestingId] = useState("");
   const [oauthCallbackUrl, setOauthCallbackUrl] = useState("");
   const [oauthCallbackStatus, setOauthCallbackStatus] = useState("");
+  const [authBrowserSession, setAuthBrowserSession] = useState(null);
+  const [authBrowserImage, setAuthBrowserImage] = useState("");
+  const [authBrowserStatus, setAuthBrowserStatus] = useState("");
+  const [authBrowserText, setAuthBrowserText] = useState("");
   const [keys, setKeys] = useState([]);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState({});
@@ -478,6 +481,7 @@ export function OpenGemConsole() {
   const [chatSending, setChatSending] = useState(false);
   const [chatSessionId, setChatSessionId] = useState(() => crypto.randomUUID());
   const chatScrollRef = useRef(null);
+  const authBrowserCompletedRef = useRef(false);
 
   const activePage = useMemo(() => PAGES.find((page) => page.id === currentPage) || PAGES[0], [currentPage]);
   const ActiveIcon = activePage.icon;
@@ -739,6 +743,135 @@ export function OpenGemConsole() {
     } finally {
       setLoadingKey("oauthCallback", false);
     }
+  }
+
+  async function startAuthBrowser() {
+    if (!selectedProxyId) return;
+    setAuthBrowserStatus("");
+    setAuthBrowserImage("");
+    setLoadingKey("authBrowser", true);
+    try {
+      const session = await requestJson("/api/auth-browser/sessions", {
+        method: "POST",
+        body: JSON.stringify({ proxyId: selectedProxyId }),
+      });
+      authBrowserCompletedRef.current = false;
+      setAuthBrowserSession(session);
+      setAuthBrowserStatus(`Remote browser started through ${session.proxyName}.`);
+    } catch (err) {
+      setAuthBrowserStatus(err.message);
+    } finally {
+      setLoadingKey("authBrowser", false);
+    }
+  }
+
+  async function refreshAuthBrowserFrame(sessionId = authBrowserSession?.id) {
+    if (!sessionId) return;
+    const data = await requestJson(`/api/auth-browser/sessions/${encodeURIComponent(sessionId)}/screenshot`);
+    setAuthBrowserSession(data);
+    setAuthBrowserImage(data.image || "");
+    if (data.error) {
+      setAuthBrowserStatus(data.error);
+    } else if (data.status === "completed") {
+      setAuthBrowserStatus("Account connected. You can close the browser.");
+    } else if (data.status === "error") {
+      setAuthBrowserStatus("Remote browser failed. Close it and start a new session.");
+    } else {
+      setAuthBrowserStatus(`Remote browser ${data.status}.`);
+    }
+    if (!authBrowserCompletedRef.current && data.status === "completed") {
+      authBrowserCompletedRef.current = true;
+      await loadAccounts();
+      await loadStats();
+    }
+  }
+
+  useEffect(() => {
+    if (view !== "dashboard" || !authBrowserSession?.id) return undefined;
+    let cancelled = false;
+    const sessionId = authBrowserSession.id;
+
+    async function poll() {
+      try {
+        if (!cancelled) await refreshAuthBrowserFrame(sessionId);
+      } catch (err) {
+        if (!cancelled) setAuthBrowserStatus(err.message);
+      }
+    }
+
+    poll();
+    const timer = window.setInterval(poll, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authBrowserSession?.id, view]);
+
+  async function clickAuthBrowser(event) {
+    if (!authBrowserSession?.id) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    await requestJson(`/api/auth-browser/sessions/${encodeURIComponent(authBrowserSession.id)}/click`, {
+      method: "POST",
+      body: JSON.stringify({ x, y }),
+    });
+    await refreshAuthBrowserFrame(authBrowserSession.id);
+  }
+
+  async function typeAuthBrowserText(text = authBrowserText) {
+    if (!authBrowserSession?.id || !text) return;
+    await requestJson(`/api/auth-browser/sessions/${encodeURIComponent(authBrowserSession.id)}/type`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    setAuthBrowserText("");
+    await refreshAuthBrowserFrame(authBrowserSession.id);
+  }
+
+  async function pressAuthBrowserKey(key) {
+    if (!authBrowserSession?.id) return;
+    await requestJson(`/api/auth-browser/sessions/${encodeURIComponent(authBrowserSession.id)}/key`, {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    });
+    await refreshAuthBrowserFrame(authBrowserSession.id);
+  }
+
+  async function closeAuthBrowser() {
+    if (authBrowserSession?.id) {
+      await requestJson(`/api/auth-browser/sessions/${encodeURIComponent(authBrowserSession.id)}`, { method: "DELETE" }).catch(() => {});
+    }
+    setAuthBrowserSession(null);
+    setAuthBrowserImage("");
+    setAuthBrowserText("");
+    authBrowserCompletedRef.current = false;
+    setAuthBrowserStatus("Remote browser closed.");
+    await loadAccounts();
+    await loadStats();
+  }
+
+  function handleAuthBrowserKeyDown(event) {
+    if (!authBrowserSession?.id) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key.length === 1) {
+      event.preventDefault();
+      void typeAuthBrowserText(event.key);
+      return;
+    }
+    const allowed = ["Enter", "Tab", "Backspace", "Delete", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"];
+    if (allowed.includes(event.key)) {
+      event.preventDefault();
+      void pressAuthBrowserKey(event.key);
+    }
+  }
+
+  function handleAuthBrowserPaste(event) {
+    if (!authBrowserSession?.id) return;
+    const text = event.clipboardData?.getData("text") || "";
+    if (!text) return;
+    event.preventDefault();
+    void typeAuthBrowserText(text);
   }
 
   async function createKey(event) {
@@ -1065,12 +1198,25 @@ export function OpenGemConsole() {
                   setOauthCallbackUrl={setOauthCallbackUrl}
                   oauthCallbackStatus={oauthCallbackStatus}
                   oauthCallbackLoading={loading.oauthCallback}
+                  authBrowserSession={authBrowserSession}
+                  authBrowserImage={authBrowserImage}
+                  authBrowserStatus={authBrowserStatus}
+                  authBrowserLoading={loading.authBrowser}
+                  authBrowserText={authBrowserText}
+                  setAuthBrowserText={setAuthBrowserText}
                   onRefresh={refreshAccountsPage}
                   onImportProxies={importProxies}
                   onDeleteProxy={deleteProxy}
                   onTestProxy={testProxy}
                   onAssignProxy={assignAccountProxy}
                   onSubmitOAuthCallback={submitManualOAuthCallback}
+                  onStartAuthBrowser={startAuthBrowser}
+                  onClickAuthBrowser={clickAuthBrowser}
+                  onTypeAuthBrowserText={typeAuthBrowserText}
+                  onPressAuthBrowserKey={pressAuthBrowserKey}
+                  onCloseAuthBrowser={closeAuthBrowser}
+                  onAuthBrowserKeyDown={handleAuthBrowserKeyDown}
+                  onAuthBrowserPaste={handleAuthBrowserPaste}
                   onDelete={deleteAccount}
                   onReactivate={reactivateAccount}
                 />
@@ -1275,12 +1421,25 @@ function AccountsPage({
   setOauthCallbackUrl,
   oauthCallbackStatus,
   oauthCallbackLoading,
+  authBrowserSession,
+  authBrowserImage,
+  authBrowserStatus,
+  authBrowserLoading,
+  authBrowserText,
+  setAuthBrowserText,
   onRefresh,
   onImportProxies,
   onDeleteProxy,
   onTestProxy,
   onAssignProxy,
   onSubmitOAuthCallback,
+  onStartAuthBrowser,
+  onClickAuthBrowser,
+  onTypeAuthBrowserText,
+  onPressAuthBrowserKey,
+  onCloseAuthBrowser,
+  onAuthBrowserKeyDown,
+  onAuthBrowserPaste,
   onDelete,
   onReactivate,
 }) {
@@ -1294,11 +1453,9 @@ function AccountsPage({
           <RefreshCcw className={cn(loading && "animate-spin")} data-icon="inline-start" />
           Refresh
         </Button>
-        <Button asChild size="sm" className={!selectedProxyId ? "pointer-events-none opacity-50" : ""}>
-          <a href={selectedProxyId ? `/api/auth/login?proxyId=${encodeURIComponent(selectedProxyId)}` : "#"} aria-disabled={!selectedProxyId}>
-            <ExternalLink data-icon="inline-start" />
-            Connect Account
-          </a>
+        <Button type="button" size="sm" onClick={onStartAuthBrowser} disabled={!selectedProxyId || authBrowserLoading}>
+          {authBrowserLoading ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <MonitorSmartphone data-icon="inline-start" />}
+          Proxied Login
         </Button>
       </PageHeader>
       <ErrorNotice>{error}</ErrorNotice>
@@ -1382,9 +1539,76 @@ function AccountsPage({
               <div className="mt-3 text-xs text-muted-foreground">
                 {selectedProxy ? selectedProxy.maskedUrl : "Connect is locked until a proxy is selected."}
               </div>
+              <div className="mt-4 space-y-3 rounded-md border bg-muted/30 p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium">Proxied auth browser</div>
+                    <div className="text-xs text-muted-foreground">
+                      Google login runs inside Chromium bound to the selected residential proxy.
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" onClick={onStartAuthBrowser} disabled={!selectedProxyId || authBrowserLoading}>
+                      {authBrowserLoading ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <MonitorSmartphone data-icon="inline-start" />}
+                      Start
+                    </Button>
+                    {authBrowserSession ? (
+                      <Button type="button" size="sm" variant="outline" onClick={onCloseAuthBrowser}>
+                        <XCircle data-icon="inline-start" />
+                        Close
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                {authBrowserStatus ? <p className="text-xs text-muted-foreground">{authBrowserStatus}</p> : null}
+                {authBrowserSession ? (
+                  <div className="space-y-3">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={onClickAuthBrowser}
+                      onKeyDown={onAuthBrowserKeyDown}
+                      onPaste={onAuthBrowserPaste}
+                      className="aspect-[1280/900] w-full cursor-crosshair overflow-hidden rounded-md border bg-background outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+                    >
+                      {authBrowserImage ? (
+                        <img src={authBrowserImage} alt="Proxied Google auth browser" draggable={false} className="h-full w-full select-none object-cover" />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                          <Loader2 className="mr-2 size-4 animate-spin" />
+                          Loading browser...
+                        </div>
+                      )}
+                    </div>
+                    <div className="grid gap-2">
+                      <Input
+                        type="password"
+                        value={authBrowserText}
+                        onChange={(event) => setAuthBrowserText(event.target.value)}
+                        placeholder="Type or paste text for the focused remote field"
+                        autoComplete="off"
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" size="sm" variant="outline" onClick={() => onTypeAuthBrowserText()}>
+                          <Send data-icon="inline-start" />
+                          Send Text
+                        </Button>
+                        {["Enter", "Tab", "Backspace"].map((key) => (
+                          <Button key={key} type="button" size="sm" variant="ghost" onClick={() => onPressAuthBrowserKey(key)}>
+                            {key}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="break-all text-[11px] text-muted-foreground">
+                      {authBrowserSession.currentUrl || "about:blank"}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <form className="mt-4 grid gap-2" onSubmit={onSubmitOAuthCallback}>
                 <label className="grid gap-2 text-sm">
-                  <span className="font-medium">Google callback URL</span>
+                  <span className="font-medium">Google callback URL fallback</span>
                   <Textarea
                     value={oauthCallbackUrl}
                     onChange={(event) => setOauthCallbackUrl(event.target.value)}

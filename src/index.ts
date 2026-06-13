@@ -26,6 +26,18 @@ import { warmAccountCache, invalidateAccountCache } from './services/account-man
 import { hashAffinityValue } from './services/account-affinity';
 import { nativeFetch } from './services/http';
 import { parseProxyInput, proxyDisplayName, sanitizeProxyError } from './services/proxy';
+import {
+    captureAuthBrowserSession,
+    clickAuthBrowserSession,
+    createAuthBrowserSessionId,
+    getAuthBrowserSession,
+    markAuthBrowserSessionCompleted,
+    markAuthBrowserSessionError,
+    pressAuthBrowserKey,
+    startAuthBrowserSession,
+    stopAuthBrowserSession,
+    typeInAuthBrowserSession,
+} from './services/auth-browser';
 
 dotenv.config();
 
@@ -293,7 +305,7 @@ app.post('/api/admin/credentials', requireAdmin, async (req, res) => {
 });
 
 // Simple in-memory store for PKCE verifiers keyed by state parameter
-const authStates = new Map<string, { verifier: string; proxyId: string }>();
+const authStates = new Map<string, { verifier: string; proxyId: string; authBrowserSessionId?: string }>();
 
 function sanitizeAccount(account: Account) {
     const { accessToken, refreshToken, proxyUrl, ...safeAccount } = account;
@@ -342,31 +354,69 @@ async function completeOAuthAccountConnection(code: string, state: string): Prom
     }
     authStates.delete(state);
 
-    const proxy = await getDatabase().getProxy(authState.proxyId);
-    if (!proxy) {
-        throw new Error('Selected account proxy is no longer available.');
+    try {
+        const proxy = await getDatabase().getProxy(authState.proxyId);
+        if (!proxy) {
+            throw new Error('Selected account proxy is no longer available.');
+        }
+        const proxyUrl = proxy.url;
+
+        const tokens = await exchangeCodeForTokens(code, authState.verifier, proxyUrl);
+        const email = await getUserEmail(tokens.accessToken, proxyUrl);
+        const projectId = await discoverProjectId(tokens.accessToken, proxyUrl);
+        const { isPro, tierName } = await checkAccountTier(tokens.accessToken, proxyUrl);
+
+        await getDatabase().upsertAccount({
+            id: email,
+            email,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            projectId,
+            expiresAt: tokens.expiresAt,
+            isActive: true,
+            isPro,
+            tierName,
+            lastUsedAt: new Date(),
+            proxyId: proxy.id,
+        });
+        invalidateAccountCache();
+        markAuthBrowserSessionCompleted(authState.authBrowserSessionId, email);
+    } catch (err) {
+        markAuthBrowserSessionError(authState.authBrowserSessionId, err);
+        throw err;
     }
-    const proxyUrl = proxy.url;
+}
 
-    const tokens = await exchangeCodeForTokens(code, authState.verifier, proxyUrl);
-    const email = await getUserEmail(tokens.accessToken, proxyUrl);
-    const projectId = await discoverProjectId(tokens.accessToken, proxyUrl);
-    const { isPro, tierName } = await checkAccountTier(tokens.accessToken, proxyUrl);
+async function createOAuthStart(proxyId: string, authBrowserSessionId?: string): Promise<{ authUrl: string; proxy: AccountProxy }> {
+    if (!proxyId) {
+        throw new Error('A proxy must be selected before connecting an account.');
+    }
 
-    await getDatabase().upsertAccount({
-        id: email,
-        email,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        projectId,
-        expiresAt: tokens.expiresAt,
-        isActive: true,
-        isPro,
-        tierName,
-        lastUsedAt: new Date(),
-        proxyId: proxy.id,
+    const proxy = await getDatabase().getProxy(proxyId);
+    if (!proxy) {
+        throw new Error('Selected proxy was not found.');
+    }
+
+    const { verifier, challenge } = generatePkce();
+    const state = crypto.randomBytes(32).toString('hex');
+    authStates.set(state, { verifier, proxyId: proxy.id, authBrowserSessionId });
+
+    const params = new URLSearchParams({
+        client_id: OAUTH_CONFIG.clientId,
+        response_type: 'code',
+        redirect_uri: OAUTH_CONFIG.redirectUri,
+        scope: OAUTH_CONFIG.scopes.join(' '),
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state,
+        access_type: 'offline',
+        prompt: 'consent',
     });
-    invalidateAccountCache();
+
+    return {
+        proxy,
+        authUrl: `${OAUTH_CONFIG.authUrl}?${params.toString()}`,
+    };
 }
 
 async function buildProxyFromInput(value: string, name?: string, id?: string): Promise<AccountProxy> {
@@ -461,37 +511,73 @@ const requireApiKey = makeApiKeyMiddleware('gemini');
 app.get('/api/auth/login', requireAdmin, async (req, res) => {
     try {
         const proxyId = String(req.query.proxyId || '').trim();
-        if (!proxyId) {
-            return res.status(400).send('A proxy must be selected before connecting an account.');
-        }
-
-        const proxy = await getDatabase().getProxy(proxyId);
-        if (!proxy) {
-            return res.status(400).send('Selected proxy was not found.');
-        }
-
-        const { verifier, challenge } = generatePkce();
-        // Separate cryptographic state parameter for CSRF protection
-        const state = crypto.randomBytes(32).toString('hex');
-        authStates.set(state, { verifier, proxyId: proxy.id });
-
-        const params = new URLSearchParams({
-            client_id: OAUTH_CONFIG.clientId,
-            response_type: 'code',
-            redirect_uri: OAUTH_CONFIG.redirectUri,
-            scope: OAUTH_CONFIG.scopes.join(' '),
-            code_challenge: challenge,
-            code_challenge_method: 'S256',
-            state: state,
-            access_type: 'offline',
-            prompt: 'consent',
-        });
-
-        res.redirect(`${OAUTH_CONFIG.authUrl}?${params.toString()}`);
+        const { authUrl } = await createOAuthStart(proxyId);
+        res.redirect(authUrl);
     } catch (err: any) {
         console.error('OAuth login error:', sanitizeProxyError(err));
-        res.status(500).send('Failed to start OAuth flow.');
+        res.status(500).send(sanitizeProxyError(err) || 'Failed to start OAuth flow.');
     }
+});
+
+app.post('/api/auth-browser/sessions', requireAdmin, async (req, res) => {
+    try {
+        const proxyId = String(req.body?.proxyId || '').trim();
+        const sessionId = createAuthBrowserSessionId();
+        const { authUrl, proxy } = await createOAuthStart(proxyId, sessionId);
+        const session = await startAuthBrowserSession({ id: sessionId, proxy, authUrl });
+        res.json(session);
+    } catch (err: any) {
+        const safeError = sanitizeProxyError(err);
+        console.error('Auth browser start error:', safeError);
+        res.status(500).json({ error: safeError || 'Failed to start proxied auth browser.' });
+    }
+});
+
+app.get('/api/auth-browser/sessions/:id', requireAdmin, (req, res) => {
+    const session = getAuthBrowserSession(String(req.params.id));
+    if (!session) {
+        return res.status(404).json({ error: 'Auth browser session not found or expired.' });
+    }
+    res.json(session);
+});
+
+app.get('/api/auth-browser/sessions/:id/screenshot', requireAdmin, async (req, res) => {
+    try {
+        res.json(await captureAuthBrowserSession(String(req.params.id)));
+    } catch (err: any) {
+        res.status(404).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.post('/api/auth-browser/sessions/:id/click', requireAdmin, async (req, res) => {
+    try {
+        const x = Number(req.body?.x);
+        const y = Number(req.body?.y);
+        res.json(await clickAuthBrowserSession(String(req.params.id), x, y));
+    } catch (err: any) {
+        res.status(400).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.post('/api/auth-browser/sessions/:id/type', requireAdmin, async (req, res) => {
+    try {
+        res.json(await typeInAuthBrowserSession(String(req.params.id), String(req.body?.text || '')));
+    } catch (err: any) {
+        res.status(400).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.post('/api/auth-browser/sessions/:id/key', requireAdmin, async (req, res) => {
+    try {
+        res.json(await pressAuthBrowserKey(String(req.params.id), String(req.body?.key || '')));
+    } catch (err: any) {
+        res.status(400).json({ error: sanitizeProxyError(err) });
+    }
+});
+
+app.delete('/api/auth-browser/sessions/:id', requireAdmin, async (req, res) => {
+    await stopAuthBrowserSession(String(req.params.id));
+    res.json({ success: true });
 });
 
 // 2. Callback from Google

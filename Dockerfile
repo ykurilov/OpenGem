@@ -16,7 +16,12 @@ FROM node:24-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3050 \
-    HOST=0.0.0.0
+    HOST=0.0.0.0 \
+    AUTH_BROWSER_CHROMIUM_PATH=/usr/bin/chromium
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium ca-certificates fonts-liberation xvfb \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 1001 opengem \
     && useradd --system --uid 1001 --gid opengem opengem \
