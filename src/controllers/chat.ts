@@ -33,6 +33,7 @@ import {
     safeEnd,
     safeWrite,
 } from '../services/streaming';
+import { beginAccountSafetyRequest, finishAccountSafetyRequest } from '../services/account-safety';
 import { resolveCompatibilityModel } from '../services/adapters/model-aliases';
 
 // ─── Constants ────────────────────────────────────────────
@@ -292,6 +293,7 @@ export async function generateContentWithAccounts(
 
             if (i > 0) await new Promise(r => setTimeout(r, INTER_ACCOUNT_STAGGER_MS));
 
+            let safetySlotAcquired = false;
             try {
                 reserveAffinityAccount(affinity, account.email);
                 const proxyUrl = getAccountProxyUrl(account);
@@ -299,6 +301,13 @@ export async function generateContentWithAccounts(
                     releaseAffinityReservation(affinity, account.email);
                     continue;
                 }
+                const safety = await beginAccountSafetyRequest(account, db);
+                if (!safety.allowed) {
+                    console.warn(`🛡️ ${account.email} safety gate blocked request: ${safety.reason}`);
+                    releaseAffinityReservation(affinity, account.email);
+                    continue;
+                }
+                safetySlotAcquired = true;
                 const token = await ensureFreshToken(account);
                 const requestPayload = buildPayload(contents, generationConfig, systemInstruction, tools, toolConfig);
                 let usedModel = model || DEFAULT_MODEL;
@@ -357,6 +366,8 @@ export async function generateContentWithAccounts(
                 releaseAffinityReservation(affinity, account.email);
                 await db.incrementAccountStats(account.email, { successful: 0, failed: 1, tokens: 0 });
                 logRequest(db, account.email, contents, `ERROR: ${e.message?.substring(0, 100) || 'Network Error'}`, 0, false, systemInstruction, modelForLog, false, affinity);
+            } finally {
+                if (safetySlotAcquired) finishAccountSafetyRequest(account.email);
             }
         }
 
@@ -551,6 +562,7 @@ export async function streamGeminiWithSink(opts: StreamWithSinkOptions): Promise
 
             if (i > 0) await new Promise(r => setTimeout(r, INTER_ACCOUNT_STAGGER_MS));
 
+            let safetySlotAcquired = false;
             try {
                 reserveAffinityAccount(affinity, account.email);
                 const proxyUrl = getAccountProxyUrl(account);
@@ -558,6 +570,13 @@ export async function streamGeminiWithSink(opts: StreamWithSinkOptions): Promise
                     releaseAffinityReservation(affinity, account.email);
                     continue;
                 }
+                const safety = await beginAccountSafetyRequest(account, db);
+                if (!safety.allowed) {
+                    console.warn(`🛡️ ${account.email} safety gate blocked stream: ${safety.reason}`);
+                    releaseAffinityReservation(affinity, account.email);
+                    continue;
+                }
+                safetySlotAcquired = true;
                 const token = await ensureFreshToken(account);
                 const requestPayload = buildPayload(contents, generationConfig, systemInstruction, tools, toolConfig);
                 let usedModel = requestedModel;
@@ -625,6 +644,8 @@ export async function streamGeminiWithSink(opts: StreamWithSinkOptions): Promise
                 markAccountCooldown(account.email, cat);
                 releaseAffinityReservation(affinity, account.email);
                 await db.incrementAccountStats(account.email, { successful: 0, failed: 1, tokens: 0 });
+            } finally {
+                if (safetySlotAcquired) finishAccountSafetyRequest(account.email);
             }
         }
 

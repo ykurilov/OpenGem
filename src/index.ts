@@ -38,6 +38,7 @@ import {
     stopAuthBrowserSession,
     typeInAuthBrowserSession,
 } from './services/auth-browser';
+import { getAccountSafetyStatus, runAccountSafetyHealthCheck } from './services/account-safety';
 
 dotenv.config();
 
@@ -844,6 +845,32 @@ app.post('/api/proxies/:id/test', requireAdmin, async (req, res) => {
     } catch (err: any) {
         console.error('Proxy test error:', sanitizeProxyError(err));
         res.status(502).json({ ok: false, error: sanitizeProxyError(err) });
+    }
+});
+
+// --- ACCOUNT SAFETY ROUTES ---
+
+app.get('/api/safety/status', requireAdmin, async (_req, res) => {
+    try {
+        res.json(await getAccountSafetyStatus(getDatabase()));
+    } catch (err: any) {
+        console.error('Safety status error:', sanitizeProxyError(err));
+        res.status(500).json({ error: sanitizeProxyError(err) || 'Failed to fetch safety status.' });
+    }
+});
+
+app.post('/api/safety/accounts/:email/health', requireAdmin, async (req, res) => {
+    try {
+        const email = decodeURIComponent(String(req.params.email || ''));
+        const accounts = await getDatabase().getAllAccounts();
+        const account = accounts.find(item => item.email === email || item.id === email);
+        if (!account) {
+            return res.status(404).json({ error: 'Account not found.' });
+        }
+        res.json(await runAccountSafetyHealthCheck(account));
+    } catch (err: any) {
+        console.error('Safety health check error:', sanitizeProxyError(err));
+        res.status(502).json({ error: sanitizeProxyError(err) || 'Safety health check failed.' });
     }
 });
 
