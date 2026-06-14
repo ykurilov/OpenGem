@@ -347,7 +347,7 @@ function parseOAuthCallbackParams(callbackUrl: string): { code?: string; state?:
     };
 }
 
-async function completeOAuthAccountConnection(code: string, state: string): Promise<void> {
+async function completeOAuthAccountConnection(code: string, state: string): Promise<{ email: string; authBrowserSessionId?: string }> {
     const authState = authStates.get(state);
     if (!authState) {
         throw new Error('Invalid or expired authentication state.');
@@ -381,6 +381,7 @@ async function completeOAuthAccountConnection(code: string, state: string): Prom
         });
         invalidateAccountCache();
         markAuthBrowserSessionCompleted(authState.authBrowserSessionId, email);
+        return { email, authBrowserSessionId: authState.authBrowserSessionId };
     } catch (err) {
         markAuthBrowserSessionError(authState.authBrowserSessionId, err);
         throw err;
@@ -417,6 +418,51 @@ async function createOAuthStart(proxyId: string, authBrowserSessionId?: string):
         proxy,
         authUrl: `${OAUTH_CONFIG.authUrl}?${params.toString()}`,
     };
+}
+
+function renderAuthBrowserCallbackPage(input: {
+    status: 'success' | 'error';
+    title: string;
+    message: string;
+    detail?: string;
+}): string {
+    const isSuccess = input.status === 'success';
+    const accent = isSuccess ? '#16a34a' : '#dc2626';
+    const label = isSuccess ? 'Done' : 'Error';
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(input.title)}</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #0f172a; }
+    main { width: min(480px, calc(100vw - 32px)); border: 1px solid #dbe4ee; border-radius: 12px; background: #fff; padding: 28px; box-shadow: 0 24px 80px rgba(15, 23, 42, 0.08); text-align: center; }
+    .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 68px; height: 32px; border-radius: 999px; background: ${accent}; color: #fff; font-weight: 700; font-size: 13px; margin-bottom: 18px; }
+    h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; }
+    p { margin: 0; color: #475569; line-height: 1.55; }
+    .detail { margin-top: 14px; font-size: 14px; color: #64748b; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="badge">${label}</div>
+    <h1>${escapeHtml(input.title)}</h1>
+    <p>${escapeHtml(input.message)}</p>
+    ${input.detail ? `<p class="detail">${escapeHtml(input.detail)}</p>` : ''}
+  </main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: string): string {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 async function buildProxyFromInput(value: string, name?: string, id?: string): Promise<AccountProxy> {
@@ -583,17 +629,48 @@ app.delete('/api/auth-browser/sessions/:id', requireAdmin, async (req, res) => {
 // 2. Callback from Google
 app.get('/api/auth/callback', async (req, res) => {
     const { code, state, error } = req.query;
+    const codeValue = typeof code === 'string' ? code : '';
+    const stateValue = typeof state === 'string' ? state : '';
+    const oauthError = typeof error === 'string' ? error : '';
+    const authBrowserSessionId = stateValue ? authStates.get(stateValue)?.authBrowserSessionId : undefined;
 
-    if (error || !code || !state) {
-        return res.status(400).send(`OAuth Error: ${error || 'Missing parameters'}`);
+    if (oauthError || !codeValue || !stateValue) {
+        const message = `OAuth Error: ${oauthError || 'Missing parameters'}`;
+        if (authBrowserSessionId) {
+            authStates.delete(stateValue);
+            markAuthBrowserSessionError(authBrowserSessionId, message);
+            return res.status(400).send(renderAuthBrowserCallbackPage({
+                status: 'error',
+                title: 'Authentication failed',
+                message,
+                detail: 'Close this browser and start a new proxied login from the Accounts page.',
+            }));
+        }
+        return res.status(400).send(message);
     }
 
     try {
-        await completeOAuthAccountConnection(code as string, state as string);
+        const result = await completeOAuthAccountConnection(codeValue, stateValue);
+        if (result.authBrowserSessionId) {
+            return res.status(200).send(renderAuthBrowserCallbackPage({
+                status: 'success',
+                title: 'Account connected',
+                message: `${result.email} is connected to OpenGem.`,
+                detail: 'You can close this remote browser. The Accounts page will refresh automatically.',
+            }));
+        }
         res.redirect('/');
     } catch (err: any) {
         const safeError = sanitizeProxyError(err);
         console.error('Callback error:', safeError);
+        if (authBrowserSessionId) {
+            return res.status(500).send(renderAuthBrowserCallbackPage({
+                status: 'error',
+                title: 'Authentication failed',
+                message: safeError,
+                detail: 'Close this browser and start a new proxied login from the Accounts page.',
+            }));
+        }
         res.status(500).send(`Authentication failed: ${safeError}`);
     }
 });
