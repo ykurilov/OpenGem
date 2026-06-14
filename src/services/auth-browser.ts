@@ -92,6 +92,7 @@ export async function startAuthBrowserSession(input: {
             env: USE_HEADLESS_BROWSER ? browserEnv : { ...browserEnv, DISPLAY: display },
             proxy: {
                 server: browserProxyUrl,
+                bypass: '127.0.0.1,localhost,::1',
             },
             ignoreDefaultArgs: ['--enable-automation'],
             args: [
