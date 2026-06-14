@@ -4,6 +4,13 @@ import { URL } from 'url';
 
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
+const GOOGLE_EGRESS_HOSTS = [
+    'google.com',
+    'googleapis.com',
+    'googleusercontent.com',
+    'gstatic.com',
+];
+
 interface RequestOptions {
     method?: string;
     headers?: Record<string, string>;
@@ -35,6 +42,7 @@ interface HttpResponse {
 export function nativeFetchStream(url: string, options: RequestOptions = {}): Promise<{ status: number; stream: import('http').IncomingMessage }> {
     return new Promise((resolve, reject) => {
         const parsedUrl = new URL(url);
+        enforceProxyForGoogleEgress(parsedUrl, options.proxyUrl);
         const isHttps = parsedUrl.protocol === 'https:';
         const lib = isHttps ? https : http;
 
@@ -74,6 +82,7 @@ export function nativeFetchStream(url: string, options: RequestOptions = {}): Pr
 export function nativeFetch(url: string, options: RequestOptions = {}): Promise<HttpResponse> {
     return new Promise((resolve, reject) => {
         const parsedUrl = new URL(url);
+        enforceProxyForGoogleEgress(parsedUrl, options.proxyUrl);
         const isHttps = parsedUrl.protocol === 'https:';
         const lib = isHttps ? https : http;
 
@@ -129,4 +138,12 @@ export function nativeFetch(url: string, options: RequestOptions = {}): Promise<
 
         req.end();
     });
+}
+
+function enforceProxyForGoogleEgress(parsedUrl: URL, proxyUrl?: string): void {
+    const hostname = parsedUrl.hostname.toLowerCase();
+    const isGoogleEgress = GOOGLE_EGRESS_HOSTS.some(host => hostname === host || hostname.endsWith(`.${host}`));
+    if (isGoogleEgress && !proxyUrl) {
+        throw new Error(`Direct Google egress is disabled for ${hostname}; account proxy is required.`);
+    }
 }
