@@ -1582,11 +1582,17 @@ function AccountsPage({
                     </div>
                     <div className="grid gap-2">
                       <Input
-                        type="password"
+                        type="text"
                         value={authBrowserText}
                         onChange={(event) => setAuthBrowserText(event.target.value)}
                         placeholder="Type or paste text for the focused remote field"
                         autoComplete="off"
+                        name="auth-browser-remote-text"
+                        inputMode="text"
+                        spellCheck={false}
+                        data-lpignore="true"
+                        data-1p-ignore="true"
+                        data-form-type="other"
                       />
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" size="sm" variant="outline" onClick={() => onTypeAuthBrowserText()}>
